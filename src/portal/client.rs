@@ -51,8 +51,8 @@ pub enum PortalError {
     },
     #[error("missing CSRF token cookie after login")]
     MissingCsrf,
-    #[error("failed to build HTTP client: {0}")]
-    BuildClient(String),
+    #[error("failed to build HTTP client")]
+    BuildClient(#[source] reqwest::Error),
     #[error("failed to parse response body: {0}")]
     Parse(String),
 }
@@ -71,7 +71,7 @@ impl PortalClient {
             .user_agent(USER_AGENT)
             .cookie_provider(jar.clone())
             .build()
-            .map_err(|e| PortalError::BuildClient(e.to_string()))?;
+            .map_err(PortalError::BuildClient)?;
         Ok(Self {
             site_id,
             creds,
