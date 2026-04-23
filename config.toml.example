@@ -1,0 +1,31 @@
+# Copy this file to config.toml and fill in your site details.
+# config.toml is baked into the Docker image at build time, so it is
+# .gitignored but must exist locally when you run `docker build`.
+
+# SolarEdge site ID (numeric). Visible in the portal URL.
+site_id = 1234567
+
+[server]
+# Address the Prometheus /metrics endpoint listens on.
+listen = "0.0.0.0:8888"
+
+[refresh]
+# Minimum seconds between portal refreshes. The portal updates at ~15-min
+# cadence, so 900s is the natural lower bound.
+optimizer_seconds = 900
+
+# Group optimizers by physical orientation so Prometheus can
+# `sum by (field) (solaredge_optimizer_power_watts)` without recording rules.
+# Unlisted optimizers get field="unassigned".
+#
+# To populate: run the exporter once with no [[fields]] entries. The startup
+# log prints every discovered optimizer with its serial, displayName, and
+# parent inverter. Copy the serials into the blocks below, then restart.
+
+# [[fields]]
+# name = "east"
+# optimizer_serials = ["7E123456-AB", "7E123457-CD"]
+#
+# [[fields]]
+# name = "south"
+# optimizer_serials = ["7E123458-EF", "7E123459-01"]

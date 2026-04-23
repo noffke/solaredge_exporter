@@ -1,0 +1,14 @@
+# SolarEdge site ID (numeric). Visible in the portal URL.
+site_id = 4863851
+
+[[fields]]
+name = "Spitzdach"
+optimizer_serials = ["17189890-57", "17189407-CA", "17187DD6-82"]
+
+[[fields]]
+name = "Gaube"
+optimizer_serials = ["17188C81-3C", "171894CB-8E", "17188E7D-3A", "17189515-D9", "171894F4-B7", "17187DFC-A8"]
+
+[[fields]]
+name = "Carport"
+optimizer_serials = ["1718913E-FE", "17188DB3-6F", "17189142-02", "17188E77-34", "17187338-DA", "17189390-52", "1718951B-DF", "17186E89-26", "17180A05-3E"]
