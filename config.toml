@@ -2,6 +2,11 @@
 site_id = 4863851
 
 [monitoring_api]
+# Seconds between calls to the public Monitoring API (battery + meter + site
+# PV lifetime counters). Hard-capped at 300 req/day; three endpoints per cycle
+# ⇒ keep ≥ 900s. Default 1800 = 30 min ≈ 144 calls/day.
+refresh_seconds = 1800
+
 state_file = "/state/state.json"
 
 [[fields]]
