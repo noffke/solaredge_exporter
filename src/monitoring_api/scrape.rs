@@ -102,12 +102,16 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
                     .set(v);
             }
             if let Some(v) = tele.ac_grid_charging
-                && v > 0.0
+                && v >= 0.0
             {
                 // `ACGridCharging` is the sum over the exact window we
                 // requested (tracked in `MonitoringApiClient`), so each cycle
                 // contributes a non-overlapping delta that accumulates into
                 // the Prometheus counter AND the persistent-state file.
+                // Record even when `v == 0` so the battery shows up in state
+                // immediately (important on sunny days where the first real
+                // grid charging may be days away). `inc_by(0)` is a no-op
+                // on the counter but creates the series at 0.
                 client.record_grid_charging(&battery.serial_number, &battery.model_number, v);
                 metrics
                     .battery_ac_grid_charging
