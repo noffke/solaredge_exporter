@@ -84,6 +84,76 @@ SelfConsumption = Production − FeedIn
 Consumption     = Production − FeedIn + Purchased
 ```
 
+#### Installing the rules
+
+**1. Copy the file to a directory Prometheus can read.**
+
+Typical layouts:
+
+| Setup | Path |
+| --- | --- |
+| bare-metal | `/etc/prometheus/rules/solaredge.rules.yml` |
+| Docker bind-mount | `./prometheus/rules/solaredge.rules.yml` next to your `prometheus.yml`, mounted into the container |
+
+**2. Reference the rules directory from `prometheus.yml`:**
+
+```yaml
+rule_files:
+  - /etc/prometheus/rules/*.yml
+```
+
+**3. Validate before reloading** (catches YAML typos and query errors):
+
+```sh
+promtool check rules /etc/prometheus/rules/solaredge.rules.yml
+# or, from inside a docker container:
+docker exec prometheus promtool check rules /etc/prometheus/rules/solaredge.rules.yml
+```
+
+**4. Reload Prometheus** so it picks the new rules up without a full restart:
+
+```sh
+# If Prometheus was started with --web.enable-lifecycle:
+curl -X POST http://localhost:9090/-/reload
+
+# Otherwise, send SIGHUP:
+kill -HUP $(pidof prometheus)
+# Docker equivalent (Prometheus usually runs as PID 1 in the container):
+docker exec prometheus kill -HUP 1
+# or with Compose:
+docker compose kill -s HUP prometheus
+```
+
+**5. Verify** at <http://localhost:9090/rules> — the `solaredge_derived` group
+should be listed with state `ok` and a `Last Evaluation` timestamp. Then
+query `solaredge_derived_lifetime_energy_watt_hours` in the UI's graph tab;
+you should see three series, one for each `type`.
+
+#### Minimal Docker Compose snippet
+
+If you're starting from scratch:
+
+```yaml
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+volumes:
+  prometheus_data:
+```
+
+Drop `recording-rules.example.yml` into `./rules/solaredge.rules.yml` and
+point `prometheus.yml` at `/etc/prometheus/rules/*.yml`.
+
 Operational metrics:
 
 - `solaredge_portal_last_refresh_timestamp_seconds{kind="telemetry|energy"}`
