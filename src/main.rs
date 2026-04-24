@@ -1,5 +1,6 @@
 mod config;
 mod metrics;
+mod monitoring_api;
 mod portal;
 mod scrape;
 mod server;
@@ -16,6 +17,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::config::Config;
 use crate::metrics::AppMetrics;
+use crate::monitoring_api::MonitoringApiClient;
 use crate::portal::{Credentials, PortalClient, Secret, flatten_layout};
 
 #[derive(Parser, Debug)]
@@ -58,6 +60,15 @@ fn load_credentials() -> Result<Credentials> {
     })
 }
 
+fn load_api_key() -> Result<Secret> {
+    let key = std::env::var("SOLAREDGE_API_KEY")
+        .map_err(|_| anyhow::anyhow!("SOLAREDGE_API_KEY env var is required but not set"))?;
+    if key.is_empty() {
+        bail!("SOLAREDGE_API_KEY must be non-empty");
+    }
+    Ok(Secret::new(key))
+}
+
 fn log_layout_tree(optimizers: &[portal::FlatOptimizer]) {
     info!(
         count = optimizers.len(),
@@ -98,8 +109,15 @@ async fn main() -> Result<()> {
 
     let creds = load_credentials()?;
     info!(username = %creds.username, "credentials loaded from environment");
+    let api_key = load_api_key()?;
+    info!("SOLAREDGE_API_KEY loaded from environment");
 
     let client = Arc::new(PortalClient::new(config.site_id, creds)?);
+    let monitoring_client = Arc::new(MonitoringApiClient::new(
+        config.site_id,
+        api_key,
+        config.monitoring_api.state_file.clone(),
+    )?);
 
     // One-shot layout fetch. Fail loudly — there's no useful work without it.
     info!("fetching site layout");
@@ -109,7 +127,11 @@ async fn main() -> Result<()> {
 
     let metrics = Arc::new(AppMetrics::new());
 
-    // Spawn background refresh task
+    // Seed the persistent grid-charging counter from disk state before any
+    // scrape task or HTTP server sees the registry.
+    monitoring_api::scrape::seed_counter_from_state(&monitoring_client, &metrics);
+
+    // Portal refresh task (per-optimizer telemetry, 15 min default)
     {
         let client = client.clone();
         let config = config.clone();
@@ -117,6 +139,16 @@ async fn main() -> Result<()> {
         let metrics = metrics.clone();
         tokio::spawn(async move {
             scrape::run(client, config, optimizers, metrics).await;
+        });
+    }
+
+    // Public Monitoring API refresh task (battery + meter + site-PV counters, 30 min default)
+    {
+        let client = monitoring_client.clone();
+        let config = config.clone();
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            monitoring_api::scrape::run(client, config, metrics).await;
         });
     }
 

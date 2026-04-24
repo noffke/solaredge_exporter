@@ -1,0 +1,69 @@
+# Example Prometheus recording rules for solaredge_exporter.
+#
+# These derive Production / Consumption / SelfConsumption lifetime energy
+# counters that aren't returned directly by the public Monitoring API when
+# the site only has a grid meter (Purchased + FeedIn). The identities below
+# hold for any site where the PV output, grid export and grid import are all
+# measured — battery charge/discharge cancels out in the lifetime totals.
+#
+#   Production      = PV lifetime energy
+#   SelfConsumption = Production − FeedIn
+#   Consumption     = Production − FeedIn + Purchased
+#
+# Copy this into the directory referenced by `rule_files:` in your
+# prometheus.yml, for example:
+#
+#     rule_files:
+#       - /etc/prometheus/rules/*.yml
+#
+# Then `promtool check rules recording-rules.example.yml` to validate, and
+# `curl -X POST http://<prometheus>:9090/-/reload` (or SIGHUP) to apply.
+
+groups:
+  - name: solaredge_derived
+    interval: 30s
+    rules:
+      # Production — alias of the site PV lifetime counter, relabelled to
+      # match the shape of the measured meter family so Grafana can select
+      # all four "types" with one selector:
+      #   solaredge_derived_lifetime_energy_watt_hours{type=~".+"}
+      #   + solaredge_monitoring_meter_lifetime_energy_watt_hours{type=~".+"}
+      - record: solaredge_derived_lifetime_energy_watt_hours
+        expr: solaredge_site_pv_lifetime_energy_watt_hours
+        labels:
+          type: Production
+
+      # Self-consumption = PV production that didn't go to the grid.
+      - record: solaredge_derived_lifetime_energy_watt_hours
+        expr: |
+          solaredge_site_pv_lifetime_energy_watt_hours
+          - sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="FeedIn"})
+        labels:
+          type: SelfConsumption
+
+      # Total household consumption = self-consumption + grid imports.
+      - record: solaredge_derived_lifetime_energy_watt_hours
+        expr: |
+          solaredge_site_pv_lifetime_energy_watt_hours
+          - sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="FeedIn"})
+          + sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="Purchased"})
+        labels:
+          type: Consumption
+
+  # Handy rate-derived series. Optional — use increase() directly in Grafana
+  # if you'd rather not materialise these. `increase()` preserves the `type`
+  # label from the source selector, so no `labels:` block is needed.
+  - name: solaredge_derived_rates
+    interval: 1m
+    rules:
+      - record: solaredge_derived_energy_today_watt_hours
+        expr: |
+          increase(solaredge_derived_lifetime_energy_watt_hours{type="Production"}[1d])
+
+      - record: solaredge_derived_energy_today_watt_hours
+        expr: |
+          increase(solaredge_derived_lifetime_energy_watt_hours{type="Consumption"}[1d])
+
+      - record: solaredge_derived_energy_today_watt_hours
+        expr: |
+          increase(solaredge_derived_lifetime_energy_watt_hours{type="SelfConsumption"}[1d])

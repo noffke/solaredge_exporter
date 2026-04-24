@@ -14,6 +14,24 @@ listen = "0.0.0.0:8888"
 # cadence, so 900s is the natural lower bound.
 optimizer_seconds = 900
 
+[monitoring_api]
+# Seconds between calls to the public Monitoring API (battery + meter + site
+# PV lifetime counters). Hard-capped at 300 req/day; three endpoints per cycle
+# ⇒ keep ≥ 900s. Default 1800 = 30 min ≈ 144 calls/day.
+refresh_seconds = 1800
+
+# Path to the persistent-state JSON file. Holds the AC grid-charging counter
+# and the last storageData query window's end timestamp — accumulating across
+# exporter restarts instead of resetting to zero.
+#
+# In Docker, mount a volume over the parent directory (e.g. `-v
+# solaredge_state:/state`) and point this at `/state/state.json` so the file
+# survives container restarts.
+#
+# Omit this key (or leave it unset) to run in "runtime-only" mode — the
+# counter resets every process restart and a WARN is logged at startup.
+state_file = "state.json"
+
 # Group optimizers by physical orientation so Prometheus can
 # `sum by (field) (solaredge_optimizer_power_watts)` without recording rules.
 # Unlisted optimizers get field="unassigned".

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -12,6 +12,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub refresh: RefreshConfig,
+    #[serde(default)]
+    pub monitoring_api: MonitoringApiConfig,
     #[serde(default)]
     pub fields: Vec<Field>,
 }
@@ -39,6 +41,30 @@ impl Default for RefreshConfig {
     fn default() -> Self {
         Self {
             optimizer_seconds: 900,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MonitoringApiConfig {
+    /// Seconds between calls to the public Monitoring API. 300 req/day hard
+    /// cap × 3 endpoints per cycle ⇒ keep this ≥ 900 s in practice.
+    pub refresh_seconds: u64,
+    /// Path to the persistent-state JSON file (holds the
+    /// `battery_ac_grid_charging` counter and the last `storageData` query
+    /// window's end timestamp). Written atomically on every successful
+    /// storage fetch. `None` ⇒ runtime-only accumulation (counter resets on
+    /// restart); a WARN is logged at startup in that case. In Docker, mount
+    /// a volume over the parent directory so the file survives restarts.
+    #[serde(default)]
+    pub state_file: Option<PathBuf>,
+}
+
+impl Default for MonitoringApiConfig {
+    fn default() -> Self {
+        Self {
+            refresh_seconds: 1800,
+            state_file: None,
         }
     }
 }
@@ -74,6 +100,8 @@ pub enum ConfigError {
     },
     #[error("refresh.optimizer_seconds must be > 0")]
     ZeroRefreshInterval,
+    #[error("monitoring_api.refresh_seconds must be > 0")]
+    ZeroMonitoringApiInterval,
 }
 
 impl Config {
@@ -94,6 +122,9 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.refresh.optimizer_seconds == 0 {
             return Err(ConfigError::ZeroRefreshInterval);
+        }
+        if self.monitoring_api.refresh_seconds == 0 {
+            return Err(ConfigError::ZeroMonitoringApiInterval);
         }
         let mut seen_names: HashSet<&str> = HashSet::new();
         for f in &self.fields {
@@ -142,6 +173,7 @@ mod tests {
         cfg.validate().expect("valid");
         assert_eq!(cfg.site_id, 42);
         assert_eq!(cfg.refresh.optimizer_seconds, 900);
+        assert_eq!(cfg.monitoring_api.refresh_seconds, 1800);
         assert_eq!(cfg.server.listen.port(), 8888);
         assert!(cfg.fields.is_empty());
     }

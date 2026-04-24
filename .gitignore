@@ -3,3 +3,16 @@
 # Added by cargo
 
 /target
+
+# Site-specific config is baked into the Docker image at build time, not committed.
+# Use config.toml.example as the template.
+config.toml
+
+# Runtime-only files
+metrics.txt
+out.txt
+
+# Persistent-state file for the monitoring_api AC-grid-charging counter.
+# In production this lives inside a mounted Docker volume, not in the repo.
+state.json
+state.json.tmp
