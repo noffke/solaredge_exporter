@@ -1,6 +1,9 @@
 # SolarEdge site ID (numeric). Visible in the portal URL.
 site_id = 4863851
 
+[monitoring_api]
+state_file = "/state/state.json"
+
 [[fields]]
 name = "Spitzdach"
 optimizer_serials = ["17189890-57", "17189407-CA", "17187DD6-82"]
