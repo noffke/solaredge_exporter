@@ -49,21 +49,3 @@ groups:
           + sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="Purchased"})
         labels:
           type: Consumption
-
-  # Handy rate-derived series. Optional — use increase() directly in Grafana
-  # if you'd rather not materialise these. `increase()` preserves the `type`
-  # label from the source selector, so no `labels:` block is needed.
-  - name: solaredge_derived_rates
-    interval: 1m
-    rules:
-      - record: solaredge_derived_energy_today_watt_hours
-        expr: |
-          increase(solaredge_derived_lifetime_energy_watt_hours{type="Production"}[1d])
-
-      - record: solaredge_derived_energy_today_watt_hours
-        expr: |
-          increase(solaredge_derived_lifetime_energy_watt_hours{type="Consumption"}[1d])
-
-      - record: solaredge_derived_energy_today_watt_hours
-        expr: |
-          increase(solaredge_derived_lifetime_energy_watt_hours{type="SelfConsumption"}[1d])
