@@ -10,6 +10,12 @@
 #   SelfConsumption = Production − FeedIn
 #   Consumption     = Production − FeedIn + Purchased
 #
+# The `solaredge_savings` group additionally turns SelfConsumption into a
+# cumulative euro-savings counter using a grid-price metric exposed by a
+# separate exporter (see PRICE_METRIC below). It works for both flat and
+# time-of-use tariffs because each per-tick energy delta is multiplied by
+# the price valid at that tick.
+#
 # Copy this into the directory referenced by `rule_files:` in your
 # prometheus.yml, for example:
 #
@@ -18,6 +24,11 @@
 #
 # Then `promtool check rules recording-rules.example.yml` to validate, and
 # `curl -X POST http://<prometheus>:9090/-/reload` (or SIGHUP) to apply.
+#
+# Job-name selectors below assume canonical names. If your `prometheus.yml`
+# uses different `job:` values, adjust the `{job="..."}` clauses accordingly
+# — without a `job` pin and with multiple scrape jobs hitting the same
+# exporter, sums will double-count.
 
 groups:
   - name: solaredge_derived
@@ -29,23 +40,130 @@ groups:
       #   solaredge_derived_lifetime_energy_watt_hours{type=~".+"}
       #   + solaredge_monitoring_meter_lifetime_energy_watt_hours{type=~".+"}
       - record: solaredge_derived_lifetime_energy_watt_hours
-        expr: solaredge_site_pv_lifetime_energy_watt_hours
+        expr: solaredge_site_pv_lifetime_energy_watt_hours{job="solaredge_exporter"}
         labels:
           type: Production
 
       # Self-consumption = PV production that didn't go to the grid.
+      # `sum by (instance, job)` collapses the meter family's extra labels
+      # (`meter`, `inverter`, `type`) down to the same shape as the LHS, so
+      # the binary subtraction matches and emits one series per scrape.
       - record: solaredge_derived_lifetime_energy_watt_hours
         expr: |
-          solaredge_site_pv_lifetime_energy_watt_hours
-          - sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="FeedIn"})
+          solaredge_site_pv_lifetime_energy_watt_hours{job="solaredge_exporter"}
+          - sum by (instance, job) (
+              solaredge_monitoring_meter_lifetime_energy_watt_hours{job="solaredge_exporter", type="FeedIn"}
+            )
         labels:
           type: SelfConsumption
 
       # Total household consumption = self-consumption + grid imports.
       - record: solaredge_derived_lifetime_energy_watt_hours
         expr: |
-          solaredge_site_pv_lifetime_energy_watt_hours
-          - sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="FeedIn"})
-          + sum(solaredge_monitoring_meter_lifetime_energy_watt_hours{type="Purchased"})
+          solaredge_site_pv_lifetime_energy_watt_hours{job="solaredge_exporter"}
+          - sum by (instance, job) (
+              solaredge_monitoring_meter_lifetime_energy_watt_hours{job="solaredge_exporter", type="FeedIn"}
+            )
+          + sum by (instance, job) (
+              solaredge_monitoring_meter_lifetime_energy_watt_hours{job="solaredge_exporter", type="Purchased"}
+            )
         labels:
           type: Consumption
+
+  # Cumulative euro-savings from PV self-consumption.
+  #
+  # PRICE_METRIC: assumes a `energy_price_exporter_price_per_kwh_eurocent`
+  # gauge (single series, no useful labels) is being scraped. Replace the
+  # name below if yours differs.
+  #
+  # SOURCE COUNTERS: total self-consumption is derived from the higher-
+  # resolution modbus/sunspec exporter (5-min cadence) rather than the
+  # 30-min monitoring API, so a varying tariff is sampled with a sensible
+  # phase error. The battery split necessarily uses this exporter's
+  # monitoring-API counter (`solaredge_battery_energy_discharged_watt_hours`)
+  # because the modbus side has no battery lifetime counter.
+  #
+  # CAVEATS:
+  #   * Cumulative totals are computed via self-referential rules. To make
+  #     them survive Prometheus restarts, each "previous value" lookup is
+  #     `max_over_time(metric[14d] offset 30s)` rather than the textbook
+  #     `metric offset 30s`. Both the input lifetime kWh and the savings
+  #     counter are monotonic, so max-over-time returns the most recent
+  #     sample in normal operation and the pre-gap peak after any gap of
+  #     up to 14 days. The range is bounded (rather than spanning full
+  #     TSDB retention) to keep per-eval scan cost flat as retention
+  #     grows — bump it if you ever need longer outage tolerance.
+  #     Trade-off: if the underlying lifetime kWh counter ever resets to
+  #     a lower value (inverter swap, modbus state corruption), the rule
+  #     freezes until the new counter climbs back past the old peak. To
+  #     un-stick, manually delete the affected series via the admin API.
+  #   * The battery bucket assumes 100 % of discharge feeds household load,
+  #     not grid export. True for setups without scheduled grid export.
+  #   * Battery round-trip losses (~10–15 %) are absorbed silently into the
+  #     "direct" bucket, slightly overstating direct self-consumption.
+  #   * AC-grid-charging the battery would inflate self-consumption (a
+  #     grid-charged kWh later discharged to load looks like saved PV).
+  #     If you start using grid-charging, subtract
+  #     `solaredge_battery_ac_grid_charging_watt_hours_total` from the
+  #     battery bucket.
+  #   * Lifetime counters are exposed as gauges (no `_total` suffix), so
+  #     `clamp_min(delta, 0)` is used to absorb the rare reset rather than
+  #     `rate()` / `increase()`.
+  - name: solaredge_savings
+    interval: 30s
+    rules:
+      - record: pv:self_consumption_lifetime_kwh
+        expr: |
+          (
+            sum(solaredge_inverter_ac_energy_watt_hours{job="solaredge_sunspec_exporter"})
+            - sum(solaredge_meter_ac_energy_watt_hours{job="solaredge_sunspec_exporter", direction="exported", phase="total"})
+          ) / 1000
+
+      - record: pv:battery_self_consumption_lifetime_kwh
+        expr: |
+          sum(solaredge_battery_energy_discharged_watt_hours{job="solaredge_exporter"}) / 1000
+
+      - record: pv:direct_self_consumption_lifetime_kwh
+        expr: |
+          pv:self_consumption_lifetime_kwh
+          - pv:battery_self_consumption_lifetime_kwh
+
+      - record: pv:savings_total_eurocent
+        expr: |
+          (
+            clamp_min(
+              pv:self_consumption_lifetime_kwh
+              - max_over_time(pv:self_consumption_lifetime_kwh[14d] offset 30s),
+              0
+            )
+            * on() group_left() energy_price_exporter_price_per_kwh_eurocent
+          )
+          + (max_over_time(pv:savings_total_eurocent[14d] offset 30s) or vector(0))
+
+      - record: pv:savings_battery_total_eurocent
+        expr: |
+          (
+            clamp_min(
+              pv:battery_self_consumption_lifetime_kwh
+              - max_over_time(pv:battery_self_consumption_lifetime_kwh[14d] offset 30s),
+              0
+            )
+            * on() group_left() energy_price_exporter_price_per_kwh_eurocent
+          )
+          + (max_over_time(pv:savings_battery_total_eurocent[14d] offset 30s) or vector(0))
+
+      - record: pv:savings_direct_total_eurocent
+        expr: |
+          pv:savings_total_eurocent - pv:savings_battery_total_eurocent
+
+      # Instantaneous savings rate, eurocent/hour. Useful for stat panels.
+      - record: pv:savings_rate_eurocent_per_hour
+        expr: |
+          (
+            (
+              pv:self_consumption_lifetime_kwh
+              - (pv:self_consumption_lifetime_kwh offset 30s)
+            )
+            / (30 / 3600)
+          )
+          * on() group_left() energy_price_exporter_price_per_kwh_eurocent

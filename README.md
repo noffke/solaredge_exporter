@@ -127,7 +127,68 @@ docker compose kill -s HUP prometheus
 **5. Verify** at <http://localhost:9090/rules> — the `solaredge_derived` group
 should be listed with state `ok` and a `Last Evaluation` timestamp. Then
 query `solaredge_derived_lifetime_energy_watt_hours` in the UI's graph tab;
-you should see three series, one for each `type`.
+you should see three series, one for each `type`. Note that `health: ok`
+on the rules page only means the query parsed and ran — it does *not*
+guarantee samples were emitted. Always confirm by querying the metric.
+
+### Cumulative euro-savings counter
+
+The same `recording-rules.example.yml` file ships a second group,
+`solaredge_savings`, that turns `SelfConsumption` into a running eurocent
+counter by multiplying each per-tick energy delta by a grid-price metric
+exposed by another exporter (assumed name:
+`energy_price_exporter_price_per_kwh_eurocent`). The integration is
+price-aware, so a future time-of-use tariff is handled correctly without
+changing the rule.
+
+Recorded series:
+
+| Metric | Unit | Notes |
+| --- | --- | --- |
+| `pv:self_consumption_lifetime_kwh` | kWh | Inverter AC energy − grid export, modbus-sourced (5-min) |
+| `pv:battery_self_consumption_lifetime_kwh` | kWh | `solaredge_battery_energy_discharged_watt_hours / 1000` |
+| `pv:direct_self_consumption_lifetime_kwh` | kWh | total − battery (battery losses absorbed here) |
+| `pv:savings_total_eurocent` | eurocent | Cumulative — survives Prometheus restarts up to 14 days (see below) |
+| `pv:savings_battery_total_eurocent` | eurocent | Battery's contribution to savings |
+| `pv:savings_direct_total_eurocent` | eurocent | Direct PV→load contribution |
+| `pv:savings_rate_eurocent_per_hour` | eurocent/h | Instantaneous; emits no sample across a >5 min Prometheus gap rather than a spurious spike |
+
+The previous-value lookup uses `max_over_time(metric[14d] offset 30s)`
+rather than `metric offset 30s`. Because both the input lifetime kWh and
+the savings counter are monotonic, this returns the prior sample in
+normal operation and the pre-gap peak after a Prometheus restart of up
+to 14 days. The gap's energy delta is priced at the post-restart price,
+which loses some accuracy on a TOU tariff but never zeros the counter.
+The 14 d range bounds per-eval scan cost so it stays flat as your TSDB
+retention grows; raise it if you expect longer outages.
+
+The one trade-off: if the underlying lifetime kWh counter ever resets to
+a lower value (inverter replacement, modbus state corruption), the rule
+will freeze its `_total` outputs until the new counter climbs back past
+the old peak. To force a clean restart, delete the affected series via
+the admin API:
+
+```sh
+curl -X POST -g 'http://localhost:9090/api/v1/admin/tsdb/delete_series?match[]=pv:savings_total_eurocent'
+curl -X POST 'http://localhost:9090/api/v1/admin/tsdb/clean_tombstones'
+```
+
+(Requires `--web.enable-admin-api` on the Prometheus binary.)
+
+Cross-check while the price is flat:
+
+```promql
+pv:savings_total_eurocent
+≈
+pv:self_consumption_lifetime_kwh * scalar(energy_price_exporter_price_per_kwh_eurocent)
+```
+
+Adjust the `{job="..."}` selectors at the top of the rules file if your
+`prometheus.yml` uses different scrape job names — `solaredge_exporter` for
+this exporter and `solaredge_sunspec_exporter` for the modbus side. Without
+a matching `job` pin the rule will silently emit no samples (because the
+selector matches nothing) or double-count (if multiple jobs scrape the same
+exporter).
 
 #### Minimal Docker Compose snippet
 
