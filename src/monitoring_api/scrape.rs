@@ -85,23 +85,20 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
 
     if let Some(r) = storage.as_ref() {
         for battery in &r.storage_data.batteries {
-            let Some(tele) = battery.latest_telemetry() else {
-                continue;
-            };
             let labels = BatteryLabels {
                 battery: battery.serial_number.clone(),
                 model: battery.model_number.clone(),
             };
-            if let Some(v) = tele.life_time_energy_charged {
+            if let Some(v) = battery.latest(|t| t.life_time_energy_charged) {
                 metrics.battery_energy_charged.get_or_create(&labels).set(v);
             }
-            if let Some(v) = tele.life_time_energy_discharged {
+            if let Some(v) = battery.latest(|t| t.life_time_energy_discharged) {
                 metrics
                     .battery_energy_discharged
                     .get_or_create(&labels)
                     .set(v);
             }
-            if let Some(v) = tele.ac_grid_charging
+            if let Some(v) = battery.latest(|t| t.ac_grid_charging)
                 && v >= 0.0
             {
                 // `ACGridCharging` is the sum over the exact window we
@@ -118,25 +115,25 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
                     .get_or_create(&labels)
                     .inc_by(v);
             }
-            if let Some(v) = tele.full_pack_energy_available {
+            if let Some(v) = battery.latest(|t| t.full_pack_energy_available) {
                 metrics
                     .battery_full_pack_energy
                     .get_or_create(&labels)
                     .set(v);
             }
-            if let Some(v) = tele.state_of_charge {
+            if let Some(v) = battery.latest(|t| t.state_of_charge) {
                 metrics
                     .battery_state_of_charge
                     .get_or_create(&labels)
                     .set(v);
             }
-            if let Some(v) = tele.power {
+            if let Some(v) = battery.latest(|t| t.power) {
                 metrics.battery_power.get_or_create(&labels).set(v);
             }
-            if let Some(v) = tele.internal_temp {
+            if let Some(v) = battery.latest(|t| t.internal_temp) {
                 metrics.battery_internal_temp.get_or_create(&labels).set(v);
             }
-            if let Some(v) = tele.battery_state {
+            if let Some(v) = battery.latest(|t| t.battery_state) {
                 metrics.battery_state.get_or_create(&labels).set(v as f64);
             }
         }
