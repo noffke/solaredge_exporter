@@ -30,6 +30,13 @@ pub enum MonitoringApiError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(
+        "{endpoint} returned HTTP 200 but no usable data — schema may have changed; body: {body}"
+    )]
+    EmptyResponse {
+        endpoint: &'static str,
+        body: String,
+    },
     #[error("failed to build HTTP client")]
     BuildClient(#[source] reqwest::Error),
     #[error("failed to format time window for request: {0}")]
@@ -84,7 +91,11 @@ impl MonitoringApiClient {
 
     pub async fn fetch_overview(&self) -> Result<OverviewResponse, MonitoringApiError> {
         let url = format!("{BASE}/site/{}/overview", self.site_id);
-        self.get_json(&url, None, "overview").await
+        // Every site has a lifetime-energy figure; its absence means drift.
+        self.get_json(&url, None, "overview", |r: &OverviewResponse| {
+            r.overview.life_time_data.energy.is_some()
+        })
+        .await
     }
 
     pub async fn fetch_meters(&self) -> Result<MetersResponse, MonitoringApiError> {
@@ -99,7 +110,15 @@ impl MonitoringApiClient {
                 "Production,Consumption,FeedIn,Purchased".to_string(),
             ),
         ];
-        self.get_json(&url, Some(&params), "meters").await
+        // A metered site always reports at least one meter value over a 2-day
+        // window (lifetime cumulative). No meter with a value means drift.
+        self.get_json(&url, Some(&params), "meters", |r: &MetersResponse| {
+            r.meter_energy_details
+                .meters
+                .iter()
+                .any(|m| m.latest_value().is_some())
+        })
+        .await
     }
 
     pub async fn fetch_storage(&self) -> Result<StorageDataResponse, MonitoringApiError> {
@@ -131,7 +150,22 @@ impl MonitoringApiClient {
 
         let url = format!("{BASE}/site/{}/storageData", self.site_id);
         let params: Vec<(&str, String)> = vec![("startTime", start), ("endTime", end)];
-        let resp = self.get_json(&url, Some(&params), "storage").await?;
+        // A battery-less site legitimately returns no batteries — that's
+        // usable. Only flag drift when batteries are present but yield no
+        // telemetry at all.
+        let resp = self
+            .get_json(&url, Some(&params), "storage", |r: &StorageDataResponse| {
+                let batteries = &r.storage_data.batteries;
+                batteries.is_empty()
+                    || batteries.iter().any(|b| {
+                        b.latest(|t| t.power).is_some()
+                            || b.latest(|t| t.full_pack_energy_available).is_some()
+                            || b.latest(|t| t.internal_temp).is_some()
+                            || b.latest(|t| t.battery_state).is_some()
+                            || b.latest(|t| t.ac_grid_charging).is_some()
+                    })
+            })
+            .await?;
 
         // Only advance the window on success.
         *self
@@ -211,11 +245,18 @@ impl MonitoringApiClient {
         }
     }
 
+    /// `usable` decides whether a parsed 200 response actually carries the data
+    /// we expect. A 200 that parses but is devoid of the expected fields (the
+    /// official API is stable, but it *can* change) is surfaced as
+    /// [`MonitoringApiError::EmptyResponse`] carrying the body, so the caller
+    /// logs it and the staleness alert fires instead of a gauge silently
+    /// freezing.
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
         extra_params: Option<&[(&str, String)]>,
         endpoint: &'static str,
+        usable: impl Fn(&T) -> bool,
     ) -> Result<T, MonitoringApiError> {
         let mut req = self
             .http
@@ -240,10 +281,17 @@ impl MonitoringApiClient {
                 body: truncate(&text),
             });
         }
-        serde_json::from_str(&text).map_err(|e| MonitoringApiError::Json {
+        let parsed: T = serde_json::from_str(&text).map_err(|e| MonitoringApiError::Json {
             endpoint,
             source: e,
-        })
+        })?;
+        if !usable(&parsed) {
+            return Err(MonitoringApiError::EmptyResponse {
+                endpoint,
+                body: truncate(&text),
+            });
+        }
+        Ok(parsed)
     }
 }
 

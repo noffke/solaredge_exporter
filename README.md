@@ -114,9 +114,9 @@ rule_files:
 **3. Validate before reloading** (catches YAML typos and query errors):
 
 ```sh
-promtool check rules /etc/prometheus/rules/solaredge_monitoring.rules.yml
+promtool check rules /etc/prometheus/rules/solaredge.rules.yml
 # or, from inside a docker container:
-docker exec prometheus promtool check rules /etc/prometheus/rules/solaredge_monitoring.rules.yml
+docker exec prometheus promtool check rules /etc/prometheus/rules/solaredge.rules.yml
 ```
 
 **4. Reload Prometheus** so it picks the new rules up without a full restart:
@@ -312,7 +312,7 @@ flags that the counter will reset on exit.
 
 Because this exporter scrapes *unofficial* SolarEdge APIs, they can break
 silently (HTTP 200 while the data quietly stops). Ready-to-use Prometheus alert
-rules live in [`monitoring/solaredge.rules.yml`](monitoring/solaredge_monitoring.rules.yml):
+rules live in [`monitoring/solaredge_monitoring.rules.yml`](monitoring/solaredge_monitoring.rules.yml):
 exporter-down, per-source data staleness (the main "an API changed" signal),
 refresh-error counters, a battery-charge/discharge-unavailable alert, and a
 guard on the public API's 300/day budget. They carry `severity: warning|critical`
@@ -339,19 +339,51 @@ receiver is handled by your existing Alertmanager config.
 > work at 15m, but a normal interval is strongly preferred and lets you tighten
 > the staleness thresholds.
 
+### Reacting to an alert — log mapping
+
+Every alert that can fire from a runtime condition has a matching `WARN` log
+line (default `RUST_LOG=info` shows them), so when one fires you can grep the
+exporter logs and see *why* immediately. The trip conditions and their logs:
+
+| Alert | Log line (level `WARN`) |
+| --- | --- |
+| `SolarEdgeExporterDown` / `…Absent` | *(none — the process is dead/unreachable; absence of logs is the signal)* |
+| `SolarEdgePortalDataStale{kind="telemetry"}` | `no optimizer telemetry committed this cycle…` (and/or per-optimizer `fetch_optimizer failed` on HTTP errors) |
+| `SolarEdgePortalDataStale{kind="energy"}` | `fetch_energy failed; continuing without lifetime energy` |
+| `SolarEdgePortalDataStale{kind="battery_energy"}` / `SolarEdgeBatteryEnergyMissing` | `fetch_battery_energy failed or returned no usable data…` (HTTP/Cognito error, **or** a parsed-but-empty 200 — the error then carries the response body) |
+| `SolarEdgePortalRefreshErrors{kind}` | the per-source lines above (optimizer / energy / battery_energy) |
+| `SolarEdgeMonitoringApiRefreshErrors{endpoint}` / `…DataStale` | `monitoring_api fetch failed or returned no usable data…` (carries the `endpoint` field; **EmptyResponse** errors include the body) |
+| `SolarEdgeApiBudgetHigh` | startup `monitoring_api.refresh_seconds is low…` |
+
+The silent-drift cases (HTTP 200 but the data stopped) are the important ones.
+The exporter detects them by validating each response and, when a 200 parses but
+lacks the expected fields, raising an **`EmptyResponse` error that carries the
+(truncated) response body** — so the `WARN` already contains the body you need to
+diff, no reconfiguration required. It also only advances each source's
+`…_last_refresh_timestamp_seconds` on a real value, so the staleness alert fires.
+For the *full* body (or for the per-optimizer `systemData` responses, which are
+logged per panel), raise this crate's log level — see below.
+
 ## Debugging portal responses
 
-Every successful portal response is logged at `DEBUG` with the full body.
-Transport-layer debug logs from `hyper`/`h2`/`reqwest` are very noisy, so
-target just this crate when investigating API drift:
+Every response (portal **and** public Monitoring API) is logged at `DEBUG` with
+the full body. Transport-layer debug logs from `hyper`/`h2`/`reqwest` are very
+noisy, so target just this crate when investigating API drift:
 
 ```sh
 RUST_LOG=info,solaredge_exporter=debug cargo run -- --config config.toml
+# Docker: add  -e RUST_LOG=info,solaredge_exporter=debug
 ```
 
-`login`, `layout/logical`, `systemData` (one per optimizer), and `layout/energy`
-bodies will appear verbatim — exactly what to diff against when an endpoint
-changes shape.
+`login`, `layout/logical`, `systemData` (one per optimizer), `layout/energy`,
+`dashboard/energy`, and the public API's `overview`/`meters`/`storage` bodies
+appear verbatim — exactly what to diff against when an endpoint changes shape.
+
+**Capturing a body after an alert fires.** You don't need DEBUG enabled *before*
+a break: an API that changed stays changed, so just raise the level and wait one
+refresh cycle (≤15 min portal, ≤30 min public API) to capture the still-broken
+response. For the parsed-but-empty (`EmptyResponse`) cases, the truncated body is
+already in the default-level `WARN`, so often you don't even need this step.
 
 ## Upstream references
 

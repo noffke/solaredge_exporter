@@ -60,7 +60,9 @@ async fn refresh_once(
         Err(e) => {
             warn!(
                 error = %e,
-                "fetch_battery_energy failed; continuing without battery charge/discharge"
+                "fetch_battery_energy failed or returned no usable data; battery charge/discharge \
+                 will go stale (the 'battery_energy' staleness alert will fire). The error includes \
+                 the response body when the dashboard schema drifted."
             );
             metrics
                 .refresh_errors
@@ -121,18 +123,31 @@ async fn refresh_once(
     // Flushing in a tight loop with no awaits and no fallible ops keeps the
     // window during which /metrics could see a mix of old and new values to
     // the bare minimum.
+    // Did at least one optimizer yield a live electrical measurement this
+    // cycle? Gates the telemetry `last_refresh` stamp below. We key off the
+    // power/voltage/current values (not the HTTP call or `energy_today`, which
+    // comes from the separate energy endpoint), so a silent schema drift on the
+    // `systemData` response — HTTP 200 but the `measurements` map renamed,
+    // leaving every value `None` — stops advancing the timestamp and trips the
+    // staleness alert. Night-safe: the portal keeps returning the last
+    // measurement (a real `Some` value) overnight rather than dropping it.
+    let mut telemetry_committed = false;
     for (labels, r) in &readings {
         if let Some(v) = r.power {
             metrics.power.get_or_create(labels).set(v);
+            telemetry_committed = true;
         }
         if let Some(v) = r.module_voltage {
             metrics.module_voltage.get_or_create(labels).set(v);
+            telemetry_committed = true;
         }
         if let Some(v) = r.dc_voltage {
             metrics.dc_voltage.get_or_create(labels).set(v);
+            telemetry_committed = true;
         }
         if let Some(v) = r.current {
             metrics.current.get_or_create(labels).set(v);
+            telemetry_committed = true;
         }
         if let Some(v) = r.energy_today {
             metrics.energy_today.get_or_create(labels).set(v);
@@ -144,38 +159,44 @@ async fn refresh_once(
 
     let now = jiff::Timestamp::now().as_second() as f64;
 
-    // Site-level battery charge/discharge (label-less gauges). `None` leaves
-    // any prior value untouched. Stamp a dedicated `last_refresh` only when we
-    // actually extracted a value: the `/services/` dashboard is an unofficial
-    // API, so a silent schema drift (HTTP 200 but the field disappears) would
-    // otherwise freeze the gauge unnoticed. Stamping on success lets a
-    // staleness alert catch it.
+    // Site-level battery charge/discharge (label-less gauges). `Some` here
+    // always carries at least one value — `fetch_battery_energy` turns a
+    // parsed-but-empty 200 (schema drift) into an error, logged above. Stamp
+    // the dedicated `last_refresh` only on real data so the staleness alert
+    // catches a drift instead of the gauges silently freezing.
     if let Some(be) = battery_energy.as_ref() {
-        let mut got_data = false;
         if let Some(v) = be.charged_watt_hours() {
             metrics.battery_energy_charged.set(v);
-            got_data = true;
         }
         if let Some(v) = be.discharged_watt_hours() {
             metrics.battery_energy_discharged.set(v);
-            got_data = true;
         }
-        if got_data {
-            metrics
-                .last_refresh
-                .get_or_create(&RefreshKind {
-                    kind: "battery_energy".into(),
-                })
-                .set(now);
-        }
+        metrics
+            .last_refresh
+            .get_or_create(&RefreshKind {
+                kind: "battery_energy".into(),
+            })
+            .set(now);
     }
 
-    metrics
-        .last_refresh
-        .get_or_create(&RefreshKind {
-            kind: "telemetry".into(),
-        })
-        .set(now);
+    if telemetry_committed {
+        metrics
+            .last_refresh
+            .get_or_create(&RefreshKind {
+                kind: "telemetry".into(),
+            })
+            .set(now);
+    } else if !optimizers.is_empty() {
+        // No optimizer yielded a usable measurement, yet the calls didn't all
+        // error (those log individually). This is the silent-drift trip for the
+        // `telemetry` staleness alert — make it obvious in the logs.
+        warn!(
+            optimizers = optimizers.len(),
+            "no optimizer telemetry committed this cycle: all optimizers returned no usable \
+             power/voltage/current. Optimizer metrics are now stale (the 'telemetry' staleness \
+             alert will fire). The portal systemData response shape may have changed."
+        );
+    }
 }
 
 async fn fetch_energy_with_metrics(

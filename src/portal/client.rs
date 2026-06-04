@@ -61,6 +61,13 @@ pub enum PortalError {
     MissingCsrf,
     #[error("Cognito auth failed: {0}")]
     CognitoAuth(String),
+    #[error(
+        "{endpoint} returned HTTP 200 but no usable data — schema may have changed; body: {body}"
+    )]
+    EmptyResponse {
+        endpoint: &'static str,
+        body: String,
+    },
     #[error("failed to build HTTP client")]
     BuildClient(#[source] reqwest::Error),
     #[error("failed to parse response body: {0}")]
@@ -331,10 +338,22 @@ impl PortalClient {
                 body: truncate(&text),
             });
         }
-        serde_json::from_str(&text).map_err(|e| PortalError::Json {
-            endpoint: "dashboard/energy",
-            source: e,
-        })
+        let resp: DashboardEnergyResponse =
+            serde_json::from_str(&text).map_err(|e| PortalError::Json {
+                endpoint: "dashboard/energy",
+                source: e,
+            })?;
+        // HTTP 200 that parses but carries neither charge nor discharge means
+        // the unofficial dashboard schema drifted. Surface it (with the body)
+        // as an error so the caller logs it and the staleness alert fires,
+        // rather than silently freezing the gauges.
+        if resp.charged_watt_hours().is_none() && resp.discharged_watt_hours().is_none() {
+            return Err(PortalError::EmptyResponse {
+                endpoint: "dashboard/energy",
+                body: truncate(&text),
+            });
+        }
+        Ok(resp)
     }
 
     fn csrf_token(&self) -> Option<String> {

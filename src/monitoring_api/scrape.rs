@@ -42,6 +42,17 @@ pub fn seed_counter_from_state(client: &MonitoringApiClient, metrics: &AppMetric
 
 pub async fn run(client: Arc<MonitoringApiClient>, config: Arc<Config>, metrics: Arc<AppMetrics>) {
     let interval = Duration::from_secs(config.monitoring_api.refresh_seconds);
+    // 3 endpoints per cycle. Surface the budget risk at startup so it maps to
+    // the SolarEdgeApiBudgetHigh alert (which only trips from polling too fast).
+    let est_requests_per_day = 3 * 86_400 / config.monitoring_api.refresh_seconds.max(1);
+    if est_requests_per_day > 250 {
+        warn!(
+            refresh_seconds = config.monitoring_api.refresh_seconds,
+            estimated_requests_per_day = est_requests_per_day,
+            "monitoring_api.refresh_seconds is low: projected requests/day approaches the 300/day \
+             hard cap (the SolarEdgeApiBudgetHigh alert may fire). Raise refresh_seconds — 900s keeps it ~144/day."
+        );
+    }
     loop {
         let start = Instant::now();
         refresh_once(&client, &metrics).await;
@@ -161,7 +172,13 @@ async fn record<T>(
             Some(v)
         }
         Err(e) => {
-            warn!(endpoint, error = %e, "monitoring_api fetch failed");
+            warn!(
+                endpoint,
+                error = %e,
+                "monitoring_api fetch failed or returned no usable data; this endpoint's data will \
+                 go stale (its refresh-error and staleness alerts will fire). EmptyResponse errors \
+                 include the response body for diffing."
+            );
             metrics
                 .monitoring_api_refresh_errors
                 .get_or_create(&labels)
