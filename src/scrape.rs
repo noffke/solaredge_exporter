@@ -54,6 +54,24 @@ async fn refresh_once(
     // sees a half-applied refresh.
     let energy = fetch_energy_with_metrics(client, metrics).await;
 
+    // `fetch_energy` warmed the session cookies the dashboard endpoint needs.
+    let battery_energy = match client.fetch_battery_energy().await {
+        Ok(e) => Some(e),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "fetch_battery_energy failed; continuing without battery charge/discharge"
+            );
+            metrics
+                .refresh_errors
+                .get_or_create(&RefreshKind {
+                    kind: "battery_energy".into(),
+                })
+                .inc();
+            None
+        }
+    };
+
     let mut readings: Vec<(OptimizerLabels, OptimizerReading)> =
         Vec::with_capacity(optimizers.len());
     for opt in optimizers {
@@ -125,6 +143,33 @@ async fn refresh_once(
     }
 
     let now = jiff::Timestamp::now().as_second() as f64;
+
+    // Site-level battery charge/discharge (label-less gauges). `None` leaves
+    // any prior value untouched. Stamp a dedicated `last_refresh` only when we
+    // actually extracted a value: the `/services/` dashboard is an unofficial
+    // API, so a silent schema drift (HTTP 200 but the field disappears) would
+    // otherwise freeze the gauge unnoticed. Stamping on success lets a
+    // staleness alert catch it.
+    if let Some(be) = battery_energy.as_ref() {
+        let mut got_data = false;
+        if let Some(v) = be.charged_watt_hours() {
+            metrics.battery_energy_charged.set(v);
+            got_data = true;
+        }
+        if let Some(v) = be.discharged_watt_hours() {
+            metrics.battery_energy_discharged.set(v);
+            got_data = true;
+        }
+        if got_data {
+            metrics
+                .last_refresh
+                .get_or_create(&RefreshKind {
+                    kind: "battery_energy".into(),
+                })
+                .set(now);
+        }
+    }
+
     metrics
         .last_refresh
         .get_or_create(&RefreshKind {

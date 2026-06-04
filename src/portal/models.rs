@@ -159,6 +159,69 @@ fn push_optimizer(inverter: &LayoutNode, opt: &LayoutNode, out: &mut Vec<FlatOpt
     });
 }
 
+/// Response of `GET /services/dashboard/energy/sites/{id}`. We only model the
+/// `summary` block — `summary.productionDistribution.productionToBattery` is the
+/// energy charged into the battery from PV, and
+/// `summary.consumptionDistribution.consumptionFromBattery` is the energy
+/// discharged from the battery to the home. Both are cumulative over the queried
+/// window. These plug the gap left by the public storageData API, which reports
+/// `lifeTimeEnergyCharged`/`Discharged` as 0 for the SolarEdge Home Battery 48V.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DashboardEnergyResponse {
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub summary: EnergySummary,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EnergySummary {
+    #[serde(
+        rename = "productionDistribution",
+        default,
+        deserialize_with = "null_is_default"
+    )]
+    pub production_distribution: ProductionDistribution,
+    #[serde(
+        rename = "consumptionDistribution",
+        default,
+        deserialize_with = "null_is_default"
+    )]
+    pub consumption_distribution: ConsumptionDistribution,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProductionDistribution {
+    #[serde(
+        rename = "productionToBattery",
+        default,
+        deserialize_with = "flexible_f64"
+    )]
+    pub production_to_battery: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConsumptionDistribution {
+    #[serde(
+        rename = "consumptionFromBattery",
+        default,
+        deserialize_with = "flexible_f64"
+    )]
+    pub consumption_from_battery: Option<f64>,
+}
+
+impl DashboardEnergyResponse {
+    /// Cumulative Wh charged into the battery from PV over the queried window.
+    pub fn charged_watt_hours(&self) -> Option<f64> {
+        self.summary.production_distribution.production_to_battery
+    }
+
+    /// Cumulative Wh discharged from the battery to the home over the queried window.
+    pub fn discharged_watt_hours(&self) -> Option<f64> {
+        self.summary
+            .consumption_distribution
+            .consumption_from_battery
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +350,44 @@ mod tests {
         assert_eq!(data.power_watts(), Some(95.5));
         assert_eq!(data.voltage_volts(), Some(38.2));
         assert_eq!(data.optimizer_voltage_volts(), Some(380.0));
+    }
+
+    #[test]
+    fn dashboard_energy_extracts_battery_charge_discharge() {
+        // Trimmed real capture from
+        // GET /services/dashboard/energy/sites/{id}. `productionToBattery` is
+        // energy charged from PV; `consumptionFromBattery` is energy discharged
+        // to the home.
+        let json = r#"{
+            "summary": {
+                "production": 691862.9,
+                "productionDistribution": {
+                    "productionToHome": 423785.06,
+                    "productionToBattery": 261387.97,
+                    "productionToGrid": 6689.8296
+                },
+                "consumption": 727944.3,
+                "consumptionDistribution": {
+                    "consumptionFromBattery": 247399.02,
+                    "consumptionFromSolar": 423785.06,
+                    "consumptionFromGrid": 56760.246
+                },
+                "averagePowerFactor": null
+            },
+            "chart": {"measurements": []}
+        }"#;
+        let r: DashboardEnergyResponse = serde_json::from_str(json).expect("dashboard energy");
+        assert_eq!(r.charged_watt_hours(), Some(261387.97));
+        assert_eq!(r.discharged_watt_hours(), Some(247399.02));
+    }
+
+    #[test]
+    fn dashboard_energy_tolerates_missing_storage_fields() {
+        // A site without a battery omits the *ToBattery / *FromBattery keys
+        // (and may null the whole distribution block).
+        let json = r#"{"summary": {"productionDistribution": null}}"#;
+        let r: DashboardEnergyResponse = serde_json::from_str(json).expect("no storage");
+        assert_eq!(r.charged_watt_hours(), None);
+        assert_eq!(r.discharged_watt_hours(), None);
     }
 }

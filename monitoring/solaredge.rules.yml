@@ -1,0 +1,116 @@
+# Prometheus alerting rules for solaredge_exporter.
+#
+# Purpose: this exporter scrapes two *unofficial* SolarEdge APIs (the portal
+# optimizer/energy endpoints and the Cognito-gated /services dashboard) plus the
+# public Monitoring API. Unofficial APIs break silently — they keep returning
+# HTTP 200 while the data quietly stops. These rules catch that without you
+# having to look at a dashboard.
+#
+# Signals used (all emitted by the exporter):
+#   - up{job="solaredge_exporter"}                              — scrape health
+#   - solaredge_portal_refresh_errors_total{kind}              — portal fetch errors
+#   - solaredge_monitoring_api_refresh_errors_total{endpoint}  — public API errors
+#   - solaredge_portal_last_refresh_timestamp_seconds{kind}    — last good portal refresh
+#   - solaredge_monitoring_api_last_refresh_timestamp_seconds{endpoint}
+#   - solaredge_battery_energy_charged_watt_hours              — the value itself
+#   - solaredge_monitoring_api_requests_total{endpoint}        — daily-budget guard
+#
+# NOTE on the *_over_time([20m]) windows: the solaredge_exporter scrape_interval
+# is 15m, which is longer than Prometheus's 5m instant-query lookback. Without
+# the range windows below, instant alert evaluations would see no samples
+# between scrapes and never fire. If you lower scrape_interval to ~60s (cheap —
+# /metrics serves cached values, no upstream calls), you can shrink these
+# windows, but they are correct as-is either way.
+
+groups:
+  - name: solaredge_exporter_health
+    rules:
+      # Exporter unreachable (process down, port closed, container stopped).
+      - alert: SolarEdgeExporterDown
+        expr: max_over_time(up{job="solaredge_exporter"}[20m]) == 0
+        for: 20m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SolarEdge exporter is down ({{ $labels.instance }})"
+          description: "Prometheus has had no successful scrape of solaredge_exporter for 20m+. No SolarEdge data is being collected."
+
+      # Target missing from Prometheus entirely (config error / never scraped).
+      - alert: SolarEdgeExporterAbsent
+        expr: absent_over_time(up{job="solaredge_exporter"}[20m])
+        for: 20m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SolarEdge exporter target is absent"
+          description: "No `up` samples for job=solaredge_exporter in the last 20m — the scrape target may have been removed from the Prometheus config."
+
+  - name: solaredge_data_staleness
+    rules:
+      # Core 'an API broke / data stopped flowing' signal. last_refresh is the
+      # exporter's wall-clock of the last *successful* upstream refresh, set per
+      # source; it stops advancing the moment a source stops returning usable
+      # data — even if the HTTP call still returns 200. Portal sources
+      # (telemetry, energy, battery_energy) refresh every 15m.
+      - alert: SolarEdgePortalDataStale
+        expr: time() - max_over_time(solaredge_portal_last_refresh_timestamp_seconds[20m]) > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge portal data stale: {{ $labels.kind }}"
+          description: "No successful portal '{{ $labels.kind }}' refresh in over 1h (expected every 15m). The unofficial portal API may have changed — check the exporter logs."
+
+      # Public Monitoring API refreshes every 30m.
+      - alert: SolarEdgeMonitoringApiDataStale
+        expr: time() - max_over_time(solaredge_monitoring_api_last_refresh_timestamp_seconds[45m]) > 5400
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge public API data stale: {{ $labels.endpoint }}"
+          description: "No successful '{{ $labels.endpoint }}' fetch in over 90m (expected every 30m)."
+
+      # Battery charge/discharge never produced a value since (re)start — e.g.
+      # the Cognito SRP login is broken, so no last_refresh{kind=battery_energy}
+      # series ever appears for the staleness rule above to act on.
+      - alert: SolarEdgeBatteryEnergyMissing
+        expr: absent_over_time(solaredge_battery_energy_charged_watt_hours[1h])
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge battery charge/discharge unavailable"
+          description: "solaredge_battery_energy_charged_watt_hours has produced no value for 1h. The Cognito login or the /services dashboard endpoint may be broken (re-capture pool/client IDs from a browser login if SolarEdge rotated them)."
+
+  - name: solaredge_errors_and_budget
+    rules:
+      # Early warning: fetches are erroring even before staleness trips.
+      - alert: SolarEdgePortalRefreshErrors
+        expr: increase(solaredge_portal_refresh_errors_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge portal refresh failing: {{ $labels.kind }}"
+          description: "{{ $value | printf \"%.0f\" }} portal '{{ $labels.kind }}' refresh error(s) in the last hour."
+
+      - alert: SolarEdgeMonitoringApiRefreshErrors
+        expr: increase(solaredge_monitoring_api_refresh_errors_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge public API refresh failing: {{ $labels.endpoint }}"
+          description: "{{ $value | printf \"%.0f\" }} '{{ $labels.endpoint }}' API error(s) in the last hour."
+
+      # The public Monitoring API is hard-capped at 300 requests/day. Normal
+      # usage is ~144/day (3 endpoints x 48 cycles). Warn before the cap.
+      - alert: SolarEdgeApiBudgetHigh
+        expr: sum(increase(solaredge_monitoring_api_requests_total[24h])) > 250
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge public API approaching daily cap"
+          description: "{{ $value | printf \"%.0f\" }} public Monitoring API requests in the last 24h (hard cap is 300/day)."

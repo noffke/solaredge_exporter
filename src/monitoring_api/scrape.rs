@@ -89,15 +89,10 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
                 battery: battery.serial_number.clone(),
                 model: battery.model_number.clone(),
             };
-            if let Some(v) = battery.latest(|t| t.life_time_energy_charged) {
-                metrics.battery_energy_charged.get_or_create(&labels).set(v);
-            }
-            if let Some(v) = battery.latest(|t| t.life_time_energy_discharged) {
-                metrics
-                    .battery_energy_discharged
-                    .get_or_create(&labels)
-                    .set(v);
-            }
+            // battery_energy_charged / battery_energy_discharged are now
+            // site-level gauges populated from the portal dashboard energy
+            // endpoint — the public storageData API reports lifeTimeEnergy*
+            // as 0 for the SolarEdge Home Battery 48V. See src/scrape.rs.
             if let Some(v) = battery.latest(|t| t.ac_grid_charging)
                 && v >= 0.0
             {
@@ -118,12 +113,6 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
             if let Some(v) = battery.latest(|t| t.full_pack_energy_available) {
                 metrics
                     .battery_full_pack_energy
-                    .get_or_create(&labels)
-                    .set(v);
-            }
-            if let Some(v) = battery.latest(|t| t.state_of_charge) {
-                metrics
-                    .battery_state_of_charge
                     .get_or_create(&labels)
                     .set(v);
             }

@@ -8,12 +8,14 @@ exporter that handles site/inverter/meter-level power and SoC.
 Two upstream sources are combined:
 
 1. **Undocumented portal endpoints** at `monitoring.solaredge.com` (pioneered by
-   [ProudElm/solaredgeoptimizers][upstream-ha]) — per-optimizer live telemetry.
-   No hard request budget, refreshes every ~15 min.
-2. **Public Monitoring API** at `monitoringapi.solaredge.com` — battery lifetime
-   charged/discharged/grid-charging counters, site meter lifetime energy, and
-   site PV lifetime energy. Rate-limited to **300 requests/day**; we poll
-   three endpoints every 30 min by default (~144 calls/day).
+   [ProudElm/solaredgeoptimizers][upstream-ha]) — per-optimizer live telemetry,
+   plus site-level battery charge/discharge energy from the dashboard energy
+   service. No hard request budget, refreshes every ~15 min.
+2. **Public Monitoring API** at `monitoringapi.solaredge.com` — battery
+   grid-charging counter, current full-pack energy / power / temp / state,
+   site meter lifetime energy, and site PV lifetime energy. Rate-limited to
+   **300 requests/day**; we poll three endpoints every 30 min by default
+   (~144 calls/day).
 
 [upstream-ha]: https://github.com/ProudElm/solaredgeoptimizers
 
@@ -50,16 +52,23 @@ Per-optimizer gauges (labels: `optimizer`, `display_name`, `inverter`, `field`):
 - `solaredge_optimizer_energy_today_watt_hours` — energy produced since the start of the current day. The portal's `/layout/energy?timeUnit=ALL` endpoint returns per-day values at the optimizer level even though the query parameter suggests otherwise; for true lifetime you can still read `solaredge_inverter_ac_energy_watt_hours` from the modbus exporter.
 - `solaredge_optimizer_last_measurement_timestamp_seconds`
 
+Site-level battery charge/discharge energy (no labels), sourced from the portal
+dashboard energy endpoint — the public API reports these as 0 for the SolarEdge
+Home Battery 48V:
+
+- `solaredge_battery_energy_charged_watt_hours` — cumulative energy charged into the battery from PV (excludes grid charging, tracked separately below)
+- `solaredge_battery_energy_discharged_watt_hours` — cumulative energy discharged from the battery to the home
+
 Battery gauges from the public Monitoring API (labels: `battery` = serial, `model`):
 
-- `solaredge_battery_energy_charged_watt_hours` — lifetime energy charged into the battery
-- `solaredge_battery_energy_discharged_watt_hours` — lifetime energy discharged from the battery
 - `solaredge_battery_ac_grid_charging_watt_hours_total` — **counter** of AC energy used to charge the battery from the grid. The API returns this as a windowed sum; the exporter tracks the last successful query timestamp and queries the exact interval since, so successive responses contribute non-overlapping deltas. **Persisted across restarts** when `monitoring_api.state_file` is set (see "Persistent state" below). Counter is seeded on first run with the last 24 h and then accumulates.
 - `solaredge_battery_full_pack_energy_watt_hours` — current maximum storable energy; divide by the nameplate value for State-of-Health
-- `solaredge_battery_state_of_charge_percent`
 - `solaredge_battery_power_watts` — positive = charging, negative = discharging
 - `solaredge_battery_internal_temperature_celsius`
 - `solaredge_battery_state` — enum: 0 Invalid, 1 Standby, 2 Thermal Mgmt, 3 Enabled, 4 Fault
+
+State of charge is **not** emitted here — the companion modbus exporter serves
+`solaredge_battery_state_of_charge_percent` from modbus at higher resolution.
 
 Site meter lifetime counters (labels: `meter`, `inverter`, `type`):
 
@@ -298,6 +307,37 @@ that session.
 
 Leave `state_file` unset for a stateless smoke-test run; a WARN at startup
 flags that the counter will reset on exit.
+
+## Monitoring & alerting
+
+Because this exporter scrapes *unofficial* SolarEdge APIs, they can break
+silently (HTTP 200 while the data quietly stops). Ready-to-use Prometheus alert
+rules live in [`monitoring/solaredge.rules.yml`](monitoring/solaredge.rules.yml):
+exporter-down, per-source data staleness (the main "an API changed" signal),
+refresh-error counters, a battery-charge/discharge-unavailable alert, and a
+guard on the public API's 300/day budget. They carry `severity: warning|critical`
+labels for Alertmanager routing.
+
+Deploy:
+
+```yaml
+# prometheus.yml
+rule_files:
+  - /etc/prometheus/rules/solaredge.rules.yml   # copy the file here
+```
+
+Then reload Prometheus (see the SIGHUP/lifecycle note above). Routing to a
+receiver is handled by your existing Alertmanager config.
+
+> **Important — scrape interval.** Set this job's `scrape_interval` to **≤ 2m**
+> (60s recommended), *not* 15m. The exporter refreshes upstream in the
+> background; `/metrics` just serves the cached values, so frequent scrapes cost
+> nothing (no upstream calls, no API budget). A 15m `scrape_interval` exceeds
+> Prometheus's 5m instant-query lookback, which makes every series "stale"
+> between scrapes — invisible to instant queries, dashboards, and most alert
+> evaluations. The shipped rules use `*_over_time([20m])` windows so they still
+> work at 15m, but a normal interval is strongly preferred and lets you tighten
+> the staleness thresholds.
 
 ## Debugging portal responses
 

@@ -92,28 +92,24 @@ pub struct BatteryTelemetry {
     pub power: Option<f64>,
     #[serde(rename = "batteryState", default)]
     pub battery_state: Option<i64>,
-    #[serde(rename = "lifeTimeEnergyCharged", default)]
-    pub life_time_energy_charged: Option<f64>,
-    #[serde(rename = "lifeTimeEnergyDischarged", default)]
-    pub life_time_energy_discharged: Option<f64>,
+    // lifeTimeEnergyCharged / lifeTimeEnergyDischarged are intentionally not
+    // modelled: the public storageData API reports them as 0 for the SolarEdge
+    // Home Battery 48V. Charge/discharge energy comes from the portal dashboard
+    // endpoint instead (see src/portal/, src/scrape.rs).
     #[serde(rename = "fullPackEnergyAvailable", default)]
     pub full_pack_energy_available: Option<f64>,
     #[serde(rename = "internalTemp", default)]
     pub internal_temp: Option<f64>,
     #[serde(rename = "ACGridCharging", default)]
     pub ac_grid_charging: Option<f64>,
-    #[serde(rename = "stateOfCharge", default)]
-    pub state_of_charge: Option<f64>,
 }
 
 impl Battery {
     /// Most recent non-null value of `field` across all telemetries.
-    /// Mirrors [`Meter::latest_value`] — the storage endpoint also returns
+    /// Mirrors [`Meter::latest_value`] — the storage endpoint can return
     /// trailing entries where a given field is null while earlier
-    /// telemetries in the same response carry a real number. Observed on
-    /// the SolarEdge Home Battery 48V (W), where `lifeTimeEnergyCharged`,
-    /// `lifeTimeEnergyDischarged`, and `stateOfCharge` are populated only
-    /// on a subset of samples.
+    /// telemetries in the same response carry a real number, so we walk
+    /// back to the freshest populated sample per field.
     pub fn latest<T: Copy>(&self, field: impl Fn(&BatteryTelemetry) -> Option<T>) -> Option<T> {
         self.telemetries.iter().rev().find_map(field)
     }
@@ -176,8 +172,8 @@ mod tests {
                     "modelNumber": "LGXXXXX",
                     "telemetryCount": 2,
                     "telemetries": [
-                        {"timeStamp":"2026-04-23 09:00:00","power":0,"batteryState":3,"lifeTimeEnergyCharged":1000,"lifeTimeEnergyDischarged":800,"fullPackEnergyAvailable":8950,"internalTemp":25,"ACGridCharging":50,"stateOfCharge":42.5},
-                        {"timeStamp":"2026-04-23 09:05:00","power":120,"batteryState":3,"lifeTimeEnergyCharged":1010,"lifeTimeEnergyDischarged":800,"fullPackEnergyAvailable":8950,"internalTemp":26,"ACGridCharging":60,"stateOfCharge":43.0}
+                        {"timeStamp":"2026-04-23 09:00:00","power":0,"batteryState":3,"fullPackEnergyAvailable":8950,"internalTemp":25,"ACGridCharging":50},
+                        {"timeStamp":"2026-04-23 09:05:00","power":120,"batteryState":3,"fullPackEnergyAvailable":8950,"internalTemp":26,"ACGridCharging":60}
                     ]
                 }]
             }
@@ -185,18 +181,17 @@ mod tests {
         let r: StorageDataResponse = serde_json::from_str(json).expect("storage");
         let b = &r.storage_data.batteries[0];
         assert_eq!(b.serial_number, "BAT1");
-        assert_eq!(b.latest(|t| t.life_time_energy_charged), Some(1010.0));
-        assert_eq!(b.latest(|t| t.state_of_charge), Some(43.0));
+        assert_eq!(b.latest(|t| t.full_pack_energy_available), Some(8950.0));
         assert_eq!(b.latest(|t| t.ac_grid_charging), Some(60.0));
     }
 
     #[test]
     fn battery_walks_back_to_latest_non_null_per_field() {
-        // Latest telemetry omits the lifetime / SoC fields (mimics the
-        // SolarEdge Home Battery 48V, which populates them only on a
-        // subset of samples); earlier telemetry has them. `latest()` must
-        // pick the earlier values up while still preferring the freshest
-        // sample for fields that *are* present in the latest entry.
+        // Latest telemetry omits ACGridCharging (the storage endpoint can
+        // return trailing entries where a field is null while earlier ones
+        // carry a real number); earlier telemetry has it. `latest()` must pick
+        // the earlier value up while still preferring the freshest sample for
+        // fields that *are* present in the latest entry.
         let json = r#"{
             "storageData": {
                 "batteries": [{
@@ -204,8 +199,8 @@ mod tests {
                     "modelNumber": "SolarEdge Home Battery 48V (W) ",
                     "telemetries": [
                         {"timeStamp":"2026-04-23 09:00:00","power":0,"batteryState":3,
-                         "lifeTimeEnergyCharged":1000,"lifeTimeEnergyDischarged":800,
-                         "stateOfCharge":42.5,"fullPackEnergyAvailable":8950,
+                         "ACGridCharging":120,
+                         "fullPackEnergyAvailable":8950,
                          "internalTemp":25},
                         {"timeStamp":"2026-04-23 09:05:00","power":120,"batteryState":3,
                          "internalTemp":26,"fullPackEnergyAvailable":8950}
@@ -215,9 +210,7 @@ mod tests {
         }"#;
         let r: StorageDataResponse = serde_json::from_str(json).expect("storage");
         let b = &r.storage_data.batteries[0];
-        assert_eq!(b.latest(|t| t.life_time_energy_charged), Some(1000.0));
-        assert_eq!(b.latest(|t| t.life_time_energy_discharged), Some(800.0));
-        assert_eq!(b.latest(|t| t.state_of_charge), Some(42.5));
+        assert_eq!(b.latest(|t| t.ac_grid_charging), Some(120.0));
         assert_eq!(b.latest(|t| t.power), Some(120.0));
         assert_eq!(b.latest(|t| t.battery_state), Some(3));
         assert_eq!(b.latest(|t| t.full_pack_energy_available), Some(8950.0));

@@ -5,10 +5,18 @@ use reqwest::{StatusCode, Url};
 use thiserror::Error;
 use tracing::{debug, info};
 
-use crate::portal::models::{EnergyResponse, LayoutResponse, OptimizerData};
+use crate::portal::cognito;
+use crate::portal::models::{
+    DashboardEnergyResponse, EnergyResponse, LayoutResponse, OptimizerData,
+};
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const ORIGIN: &str = "https://monitoring.solaredge.com";
+/// Fixed lower bound for the battery charge/discharge query window. Any date
+/// before the battery's commissioning works (PV-only years contribute zero
+/// battery flow); keeping it fixed makes the resulting cumulative totals
+/// monotonic. 2015 predates the SolarEdge Home Battery line.
+const BATTERY_ENERGY_START_DATE: &str = "2015-01-01";
 
 pub struct Secret(String);
 
@@ -51,6 +59,8 @@ pub enum PortalError {
     },
     #[error("missing CSRF token cookie after login")]
     MissingCsrf,
+    #[error("Cognito auth failed: {0}")]
+    CognitoAuth(String),
     #[error("failed to build HTTP client")]
     BuildClient(#[source] reqwest::Error),
     #[error("failed to parse response body: {0}")]
@@ -62,6 +72,13 @@ pub struct PortalClient {
     creds: Credentials,
     http: reqwest::Client,
     jar: Arc<Jar>,
+    /// Cached `se_monitoring_auth` Cognito token for the `/services/` API,
+    /// refreshed via SRP when missing or expired.
+    se_monitoring_auth: tokio::sync::Mutex<Option<SeMonitoringAuth>>,
+}
+
+struct SeMonitoringAuth {
+    expires_at: jiff::Timestamp,
 }
 
 impl PortalClient {
@@ -77,6 +94,7 @@ impl PortalClient {
             creds,
             http,
             jar,
+            se_monitoring_auth: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -239,6 +257,86 @@ impl PortalClient {
         })
     }
 
+    /// Ensure a valid `se_monitoring_auth` cookie is in the jar, performing the
+    /// Cognito SRP login when the cached token is missing or about to expire.
+    /// The access token is long-lived (~24 h), so this hits Cognito at most
+    /// once a day; every other refresh cycle is a no-op.
+    async fn ensure_se_monitoring_auth(&self) -> Result<(), PortalError> {
+        let mut guard = self.se_monitoring_auth.lock().await;
+        let now = jiff::Timestamp::now();
+        if let Some(s) = guard.as_ref()
+            && s.expires_at > now
+        {
+            return Ok(());
+        }
+        let tokens = cognito::login(
+            &self.http,
+            &self.creds.username,
+            self.creds.password.expose(),
+        )
+        .await?;
+        // Renew a touch early; clamp pathologically short lifetimes.
+        let ttl = (tokens.expires_in - 60).max(60);
+        let expires_at = now
+            .checked_add(jiff::SignedDuration::from_secs(ttl))
+            .unwrap_or(now);
+        let url = Url::parse(ORIGIN).map_err(|e| PortalError::Parse(e.to_string()))?;
+        self.jar
+            .add_cookie_str(&format!("se_monitoring_auth={}", tokens.access_token), &url);
+        *guard = Some(SeMonitoringAuth { expires_at });
+        info!("obtained se_monitoring_auth via Cognito SRP");
+        Ok(())
+    }
+
+    /// Site-level battery charge/discharge energy from the monitoring
+    /// dashboard's energy service. This plugs the gap left by the public
+    /// `storageData` API, which reports `lifeTimeEnergyCharged`/`Discharged`
+    /// as 0 for the SolarEdge Home Battery 48V. The endpoint rides the session
+    /// cookies warmed by `login()`, so call `login()` (or `fetch_energy`)
+    /// first in the same refresh cycle.
+    ///
+    /// We query a wide, fixed window so `summary` reflects the battery's whole
+    /// lifetime and the totals stay monotonic across refreshes.
+    pub async fn fetch_battery_energy(&self) -> Result<DashboardEnergyResponse, PortalError> {
+        // Authenticated by the Cognito `se_monitoring_auth` cookie, not Basic
+        // auth — see `cognito`. The cookie lives in the shared jar.
+        self.ensure_se_monitoring_auth().await?;
+        let today = jiff::Zoned::now().date();
+        let url = format!(
+            "{ORIGIN}/services/dashboard/energy/sites/{}?chart-time-unit=years&start-date={}&end-date={}&measurement-types=production-distribution-with-storage%2Cconsumption-distribution-with-storage&isCniViewer=true",
+            self.site_id, BATTERY_ENERGY_START_DATE, today
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header(
+                reqwest::header::REFERER,
+                format!("{ORIGIN}/solaredge-web/p/site/{}/", self.site_id),
+            )
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        debug!(
+            endpoint = "dashboard/energy",
+            status = %status,
+            body = text.as_str(),
+            "portal response"
+        );
+        if !status.is_success() {
+            return Err(PortalError::Status {
+                endpoint: "dashboard/energy",
+                status,
+                body: truncate(&text),
+            });
+        }
+        serde_json::from_str(&text).map_err(|e| PortalError::Json {
+            endpoint: "dashboard/energy",
+            source: e,
+        })
+    }
+
     fn csrf_token(&self) -> Option<String> {
         let url = Url::parse(ORIGIN).ok()?;
         let header = CookieStore::cookies(self.jar.as_ref(), &url)?;
@@ -253,7 +351,7 @@ impl PortalClient {
     }
 }
 
-fn truncate(s: &str) -> String {
+pub(crate) fn truncate(s: &str) -> String {
     const MAX: usize = 500;
     if s.len() <= MAX {
         return s.to_string();

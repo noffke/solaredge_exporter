@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+aws-cognito-srp = "0.2.5"
 axum = "0.8.9"
 clap = { version = "4.6.1", features = ["derive"] }
 jiff = "0.2.27"

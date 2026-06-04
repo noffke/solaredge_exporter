@@ -1,0 +1,147 @@
+{
+  "storageData": {
+    "batteryCount": 1,
+    "batteries": [
+      {
+        "nameplate": 9200.0,
+        "serialNumber": "7B054BED",
+        "modelNumber": "SolarEdge Home Battery 48V (W) ",
+        "telemetryCount": 12,
+        "telemetries": [
+          {
+            "timeStamp": "2026-05-14 18:03:05",
+            "power": 784.0,
+            "batteryState": 3,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 98.88889,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.9,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:08:05",
+            "power": 0.0,
+            "batteryState": 6,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 100.0,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.9,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:13:05",
+            "power": 0.0,
+            "batteryState": 6,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 100.0,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.800001,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:18:06",
+            "power": -288.0,
+            "batteryState": 4,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 98.88889,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.7,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:23:05",
+            "power": -545.0,
+            "batteryState": 4,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 98.88889,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.7,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:28:05",
+            "power": -1324.0,
+            "batteryState": 4,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 97.77778,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.6,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:33:05",
+            "power": 162.0,
+            "batteryState": 3,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 97.77778,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.6,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:38:05",
+            "power": 781.0,
+            "batteryState": 3,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 97.77778,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.6,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:43:05",
+            "power": 669.0,
+            "batteryState": 3,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 98.88889,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.5,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:48:05",
+            "power": -2954.0,
+            "batteryState": 4,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 97.77778,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.5,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:53:05",
+            "power": 849.0,
+            "batteryState": 3,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 98.88889,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.5,
+            "ACGridCharging": 0.0
+          },
+          {
+            "timeStamp": "2026-05-14 18:58:05",
+            "power": 0.0,
+            "batteryState": 6,
+            "lifeTimeEnergyDischarged": 0,
+            "lifeTimeEnergyCharged": 0,
+            "batteryPercentageState": 100.0,
+            "fullPackEnergyAvailable": 9123.84,
+            "internalTemp": 20.5,
+            "ACGridCharging": 0.0
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -54,12 +54,15 @@ pub struct AppMetrics {
     pub refresh_errors: Family<RefreshKind, Counter>,
     pub login_count: Counter,
 
+    // Site-level battery charge/discharge energy (from the portal dashboard
+    // energy endpoint — the public storageData API reports these as 0 for
+    // SolarEdge Home Battery 48V).
+    pub battery_energy_charged: Gauge<f64, AtomicU64>,
+    pub battery_energy_discharged: Gauge<f64, AtomicU64>,
+
     // Battery (from /site/{id}/storageData)
-    pub battery_energy_charged: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
-    pub battery_energy_discharged: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
     pub battery_ac_grid_charging: Family<BatteryLabels, Counter<f64, AtomicU64>>,
     pub battery_full_pack_energy: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
-    pub battery_state_of_charge: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
     pub battery_power: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
     pub battery_internal_temp: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
     pub battery_state: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
@@ -93,15 +96,11 @@ impl AppMetrics {
         let refresh_errors: Family<RefreshKind, Counter> = Family::default();
         let login_count = Counter::default();
 
-        let battery_energy_charged: Family<BatteryLabels, Gauge<f64, AtomicU64>> =
-            Family::default();
-        let battery_energy_discharged: Family<BatteryLabels, Gauge<f64, AtomicU64>> =
-            Family::default();
+        let battery_energy_charged: Gauge<f64, AtomicU64> = Gauge::default();
+        let battery_energy_discharged: Gauge<f64, AtomicU64> = Gauge::default();
         let battery_ac_grid_charging: Family<BatteryLabels, Counter<f64, AtomicU64>> =
             Family::default();
         let battery_full_pack_energy: Family<BatteryLabels, Gauge<f64, AtomicU64>> =
-            Family::default();
-        let battery_state_of_charge: Family<BatteryLabels, Gauge<f64, AtomicU64>> =
             Family::default();
         let battery_power: Family<BatteryLabels, Gauge<f64, AtomicU64>> = Family::default();
         let battery_internal_temp: Family<BatteryLabels, Gauge<f64, AtomicU64>> = Family::default();
@@ -170,12 +169,12 @@ impl AppMetrics {
 
         registry.register(
             "battery_energy_charged_watt_hours",
-            "Lifetime energy charged into the battery, in Wh",
+            "Site lifetime energy charged into the battery from PV, in Wh (from the portal dashboard energy endpoint; excludes grid charging — see battery_ac_grid_charging_watt_hours)",
             battery_energy_charged.clone(),
         );
         registry.register(
             "battery_energy_discharged_watt_hours",
-            "Lifetime energy discharged from the battery, in Wh",
+            "Site lifetime energy discharged from the battery to the home, in Wh (from the portal dashboard energy endpoint)",
             battery_energy_discharged.clone(),
         );
         registry.register(
@@ -187,11 +186,6 @@ impl AppMetrics {
             "battery_full_pack_energy_watt_hours",
             "Current maximum energy storable in the battery, in Wh (divide by nameplate for State-of-Health)",
             battery_full_pack_energy.clone(),
-        );
-        registry.register(
-            "battery_state_of_charge_percent",
-            "Battery state of charge as percentage of available capacity",
-            battery_state_of_charge.clone(),
         );
         registry.register(
             "battery_power_watts",
@@ -258,7 +252,6 @@ impl AppMetrics {
             battery_energy_discharged,
             battery_ac_grid_charging,
             battery_full_pack_energy,
-            battery_state_of_charge,
             battery_power,
             battery_internal_temp,
             battery_state,

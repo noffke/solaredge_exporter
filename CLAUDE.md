@@ -7,11 +7,12 @@ Project-specific guidance for Claude Code when working in this repository.
 Rust Prometheus exporter combining two SolarEdge data sources:
 
 1. **Undocumented portal scrape** (`src/portal/`) — per-optimizer live
-   telemetry. Ports `ProudElm/packaging_solaredgeoptimizers` against
-   `monitoring.solaredge.com`. No request budget; refreshes every 15 min.
-2. **Public Monitoring API** (`src/monitoring_api/`) — battery lifetime
-   counters (`lifeTimeEnergyCharged`, `lifeTimeEnergyDischarged`,
-   `ACGridCharging`, `fullPackEnergyAvailable`, SoC/power/temp/state),
+   telemetry, plus **site-level battery charge/discharge energy** from the
+   dashboard energy service (see below). Ports
+   `ProudElm/packaging_solaredgeoptimizers` against `monitoring.solaredge.com`.
+   No request budget; refreshes every 15 min.
+2. **Public Monitoring API** (`src/monitoring_api/`) — battery
+   `ACGridCharging`, `fullPackEnergyAvailable`, power/temp/state,
    site meter lifetime energy, and site PV lifetime energy. Hand-rolled
    against `monitoringapi.solaredge.com` (we don't use the `solaredge`
    crate — its `http-adapter` transitively pins `reqwest 0.12` and we're
@@ -19,8 +20,20 @@ Rust Prometheus exporter combining two SolarEdge data sources:
    three calls per cycle (~144 calls/day).
 
 Complements a separate modbus-based exporter (inverter/meter/DER live power,
-battery SoC). Don't duplicate those metrics here — add new ones via the public
-API only when they plug a genuine gap (e.g. battery charge/discharge lifetime).
+battery SoC). Don't duplicate those metrics here — battery SoC
+(`solaredge_battery_state_of_charge_percent`) is intentionally **not** emitted
+by this exporter; the modbus exporter serves it from modbus at higher
+resolution. Add new public-API metrics only when they plug a genuine gap.
+
+**Battery charge/discharge energy is sourced from the portal, not the public
+API.** The public `storageData` endpoint reports `lifeTimeEnergyCharged` /
+`lifeTimeEnergyDischarged` as `0` for the SolarEdge Home Battery 48V (LG-cell
+batteries aggregate these from deltas; SolarEdge's own docs note the result is
+"incomplete"). So `solaredge_battery_energy_charged_watt_hours` /
+`_discharged_watt_hours` are **label-less site-level gauges** populated from the
+dashboard energy endpoint's `productionToBattery` / `consumptionFromBattery`.
+Caveat: `productionToBattery` is PV→battery only and excludes grid charging
+(tracked separately by `battery_ac_grid_charging_watt_hours`).
 
 ## Repo conventions (from `context.md`)
 
@@ -46,9 +59,15 @@ API only when they plug a genuine gap (e.g. battery charge/discharge lifetime).
 - logging: `tracing` + `tracing-subscriber`
 - time: `jiff` (not `chrono`, not `time`)
 - errors: `thiserror` in modules, `anyhow` in `main`
+- Cognito SRP login: `aws-cognito-srp` (computes the SRP handshake for the
+  `/services/` dashboard auth; we do the HTTP ourselves — see `portal/cognito.rs`)
 
-Prefer these when extending the code. Don't introduce `chrono`, `log`, `hyper`
-directly, or `native-tls`.
+Prefer these when extending the code. Don't use `chrono`, `log`, `hyper`, or
+`native-tls` **directly** in our code (use `jiff`/`tracing`/`reqwest`/rustls).
+Note: `chrono`, `log`, and `regex` now arrive *transitively* via
+`aws-cognito-srp` — that's accepted (the "no chrono" rule was a
+direct-usage/consistency preference, not a hard dependency ban), but keep using
+`jiff` for our own time handling.
 
 ## Runtime
 
@@ -84,9 +103,27 @@ directly, or `native-tls`.
 | `GET monitoring.solaredge.com/solaredge-apigw/api/sites/{siteId}/layout/logical` | Basic |
 | `GET monitoring.solaredge.com/solaredge-web/p/systemData?reporterId=…&type=panel&fieldId={siteId}&isPublic=false&locale=en_US&v={millis}` | Basic |
 | `POST monitoring.solaredge.com/solaredge-apigw/api/sites/{siteId}/layout/energy?timeUnit=ALL` | Basic + CSRF cookie + `Content-Type: application/json` |
+| `GET monitoring.solaredge.com/services/dashboard/energy/sites/{siteId}?chart-time-unit=years&start-date=…&end-date=…&measurement-types=production-distribution-with-storage,consumption-distribution-with-storage&isCniViewer=true` | **Cognito JWT** in `se_monitoring_auth` cookie (Basic auth is rejected) |
 
 `systemData` responses have non-JSON prefix junk — use `client::extract_json`
-(mirrors Python's `jsonfinder`).
+(mirrors Python's `jsonfinder`). The `services/dashboard/energy` endpoint
+returns clean JSON; we read `summary.productionDistribution.productionToBattery`
+(charged) and `summary.consumptionDistribution.consumptionFromBattery`
+(discharged). We query a wide fixed window (`start-date=2015-01-01` → today) so
+the cumulative totals stay monotonic; see `BATTERY_ENERGY_START_DATE` in
+`portal/client.rs`.
+
+**`/services/` auth is different from the rest of the portal.** The old
+`/solaredge-web/` and `/solaredge-apigw/` endpoints accept HTTP Basic auth; the
+new `/services/` platform is gated by an **AWS Cognito** access-token JWT
+(user pool `eu-central-1_fVUTz39em`, app client `ugfnsujd3384sshcjehaphlh3`)
+carried in the `se_monitoring_auth` cookie. `USER_PASSWORD_AUTH` is disabled, so
+we log in via **SRP** (`USER_SRP_AUTH`) using the same `SOLAREDGE_USERNAME` /
+`SOLAREDGE_PASSWORD` — `portal/cognito.rs` runs the handshake (crypto by
+`aws-cognito-srp`, HTTP by us against `cognito-idp.eu-central-1.amazonaws.com`),
+and `PortalClient::ensure_se_monitoring_auth` caches the token (~24 h) and seeds
+the cookie jar. If SolarEdge rotates the pool/client IDs, re-capture from a
+browser login and update the constants in `portal/cognito.rs`.
 
 ## Public Monitoring API endpoints (`src/monitoring_api/`)
 
@@ -96,7 +133,7 @@ All on `monitoringapi.solaredge.com`, all take `?api_key={key}` query param:
 | --- | --- |
 | `GET /site/{siteId}/overview` | Site PV lifetime energy (`overview.lifeTimeData.energy`) |
 | `GET /site/{siteId}/meters?meters=Production,Consumption,FeedIn,Purchased&startTime&endTime&timeUnit=DAY` | Per-meter lifetime energy — we take the most recent `value` |
-| `GET /site/{siteId}/storageData?startTime&endTime` | Per-battery telemetry list — we take the latest telemetry entry |
+| `GET /site/{siteId}/storageData?startTime&endTime` | Per-battery telemetry list — we take the latest entry for `ACGridCharging`, `fullPackEnergyAvailable`, power/temp/state. **Not** charge/discharge energy — those `lifeTimeEnergy*` fields are 0 here; see portal endpoint above |
 
 Response field `unscaledEnergy` (not used here, but in the portal energy
 endpoint) can arrive as either a number or a quoted string. Storage endpoint
@@ -168,6 +205,20 @@ To avoid partial reads, `refresh_once` is structured as two phases:
 This keeps the inconsistent-read window under a millisecond. If you ever need
 truly atomic (byte-level) reads, wrap the `AppMetrics` families behind an
 `ArcSwap` or `tokio::sync::RwLock` — but don't switch to scrape-triggered.
+
+**Prometheus `scrape_interval` must stay well under 5 min (60s recommended),
+even though upstream only refreshes every 15–30 min.** `/metrics` serves cached
+gauges (no upstream calls), so frequent scrapes are free. A 15 min interval
+exceeds Prometheus's 5 min instant-query lookback, so every series goes "stale"
+between scrapes and disappears from instant queries, dashboards, and alert-rule
+evaluations (the target still shows healthy — only the stored samples are too
+sparse). Alert rules in `monitoring/solaredge.rules.yml` use `*_over_time([20m])`
+windows to tolerate a too-long interval, but don't rely on that. Staleness
+alerting keys off `solaredge_*_last_refresh_timestamp_seconds`, which the
+exporter stamps per source on each successful refresh — including
+`kind="battery_energy"`, stamped only when charge/discharge values were actually
+extracted so silent schema drift on the unofficial `/services/` endpoint trips
+the alert.
 
 ## Out of scope (don't add without asking)
 
