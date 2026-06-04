@@ -114,9 +114,9 @@ rule_files:
 **3. Validate before reloading** (catches YAML typos and query errors):
 
 ```sh
-promtool check rules /etc/prometheus/rules/solaredge.rules.yml
+promtool check rules /etc/prometheus/rules/solaredge_monitoring.rules.yml
 # or, from inside a docker container:
-docker exec prometheus promtool check rules /etc/prometheus/rules/solaredge.rules.yml
+docker exec prometheus promtool check rules /etc/prometheus/rules/solaredge_monitoring.rules.yml
 ```
 
 **4. Reload Prometheus** so it picks the new rules up without a full restart:
@@ -312,7 +312,7 @@ flags that the counter will reset on exit.
 
 Because this exporter scrapes *unofficial* SolarEdge APIs, they can break
 silently (HTTP 200 while the data quietly stops). Ready-to-use Prometheus alert
-rules live in [`monitoring/solaredge.rules.yml`](monitoring/solaredge.rules.yml):
+rules live in [`monitoring/solaredge.rules.yml`](monitoring/solaredge_monitoring.rules.yml):
 exporter-down, per-source data staleness (the main "an API changed" signal),
 refresh-error counters, a battery-charge/discharge-unavailable alert, and a
 guard on the public API's 300/day budget. They carry `severity: warning|critical`
@@ -323,7 +323,7 @@ Deploy:
 ```yaml
 # prometheus.yml
 rule_files:
-  - /etc/prometheus/rules/solaredge.rules.yml   # copy the file here
+  - /etc/prometheus/rules/solaredge_monitoring.rules.yml   # copy the file here
 ```
 
 Then reload Prometheus (see the SIGHUP/lifecycle note above). Routing to a
