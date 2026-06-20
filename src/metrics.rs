@@ -82,8 +82,6 @@ pub struct AppMetrics {
     // Battery (from /site/{id}/storageData)
     pub battery_ac_grid_charging: Family<BatteryLabels, Counter<f64, AtomicU64>>,
     pub battery_full_pack_energy: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
-    pub battery_power: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
-    pub battery_internal_temp: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
     pub battery_state: Family<BatteryLabels, Gauge<f64, AtomicU64>>,
 
     // Site-level meter lifetime counters (from /site/{id}/meters)
@@ -122,8 +120,6 @@ impl AppMetrics {
             Family::default();
         let battery_full_pack_energy: Family<BatteryLabels, Gauge<f64, AtomicU64>> =
             Family::default();
-        let battery_power: Family<BatteryLabels, Gauge<f64, AtomicU64>> = Family::default();
-        let battery_internal_temp: Family<BatteryLabels, Gauge<f64, AtomicU64>> = Family::default();
         let battery_state: Family<BatteryLabels, Gauge<f64, AtomicU64>> = Family::default();
         let monitoring_meter_lifetime_energy: Family<MeterLabels, Gauge<f64, AtomicU64>> =
             Family::default();
@@ -208,16 +204,6 @@ impl AppMetrics {
             battery_full_pack_energy.clone(),
         );
         registry.register(
-            "battery_power_watts",
-            "Battery instantaneous power (positive = charging, negative = discharging)",
-            battery_power.clone(),
-        );
-        registry.register(
-            "battery_internal_temperature_celsius",
-            "Battery internal temperature",
-            battery_internal_temp.clone(),
-        );
-        registry.register(
             "battery_state",
             "Raw batteryState value reported by the API. The public docs list 0=Invalid/1=Standby/2=ThermalMgmt/3=Enabled/4=Fault, but that mapping is stale for newer SolarEdge Home Battery families (value 4 has been observed on healthy discharging batteries) — interpret in conjunction with the portal UI",
             battery_state.clone(),
@@ -272,8 +258,6 @@ impl AppMetrics {
             battery_energy_discharged,
             battery_ac_grid_charging,
             battery_full_pack_energy,
-            battery_power,
-            battery_internal_temp,
             battery_state,
             monitoring_meter_lifetime_energy,
             site_pv_lifetime_energy,

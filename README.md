@@ -63,12 +63,14 @@ Battery gauges from the public Monitoring API (labels: `battery` = serial, `mode
 
 - `solaredge_battery_ac_grid_charging_watt_hours_total` — **counter** of AC energy used to charge the battery from the grid. The API returns this as a windowed sum; the exporter tracks the last successful query timestamp and queries the exact interval since, so successive responses contribute non-overlapping deltas. **Persisted across restarts** when `monitoring_api.state_file` is set (see "Persistent state" below). Counter is seeded on first run with the last 24 h and then accumulates.
 - `solaredge_battery_full_pack_energy_watt_hours` — current maximum storable energy; divide by the nameplate value for State-of-Health
-- `solaredge_battery_power_watts` — positive = charging, negative = discharging
-- `solaredge_battery_internal_temperature_celsius`
 - `solaredge_battery_state` — enum: 0 Invalid, 1 Standby, 2 Thermal Mgmt, 3 Enabled, 4 Fault
 
 State of charge is **not** emitted here — the companion modbus exporter serves
 `solaredge_battery_state_of_charge_percent` from modbus at higher resolution.
+Instantaneous battery **power** and **temperature** are likewise not emitted
+here: the modbus/sunspec exporter publishes `solaredge_battery_power_watts` and
+`solaredge_battery_temperature_celsius` in real time (1 min) from the proprietary
+battery register block, so the portal's hourly equivalents were dropped.
 
 Site meter lifetime counters (labels: `meter`, `inverter`, `type`):
 

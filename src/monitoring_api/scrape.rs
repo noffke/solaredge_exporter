@@ -130,12 +130,6 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
                     .get_or_create(&labels)
                     .set(v);
             }
-            if let Some(v) = battery.latest(|t| t.power) {
-                metrics.battery_power.get_or_create(&labels).set(v);
-            }
-            if let Some(v) = battery.latest(|t| t.internal_temp) {
-                metrics.battery_internal_temp.get_or_create(&labels).set(v);
-            }
             if let Some(v) = battery.latest(|t| t.battery_state) {
                 metrics.battery_state.get_or_create(&labels).set(v as f64);
             }

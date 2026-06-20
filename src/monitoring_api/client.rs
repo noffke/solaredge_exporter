@@ -158,9 +158,7 @@ impl MonitoringApiClient {
                 let batteries = &r.storage_data.batteries;
                 batteries.is_empty()
                     || batteries.iter().any(|b| {
-                        b.latest(|t| t.power).is_some()
-                            || b.latest(|t| t.full_pack_energy_available).is_some()
-                            || b.latest(|t| t.internal_temp).is_some()
+                        b.latest(|t| t.full_pack_energy_available).is_some()
                             || b.latest(|t| t.battery_state).is_some()
                             || b.latest(|t| t.ac_grid_charging).is_some()
                     })

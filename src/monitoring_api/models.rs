@@ -88,8 +88,6 @@ pub struct Battery {
 
 #[derive(Debug, Deserialize)]
 pub struct BatteryTelemetry {
-    #[serde(default)]
-    pub power: Option<f64>,
     #[serde(rename = "batteryState", default)]
     pub battery_state: Option<i64>,
     // lifeTimeEnergyCharged / lifeTimeEnergyDischarged are intentionally not
@@ -98,8 +96,6 @@ pub struct BatteryTelemetry {
     // endpoint instead (see src/portal/, src/scrape.rs).
     #[serde(rename = "fullPackEnergyAvailable", default)]
     pub full_pack_energy_available: Option<f64>,
-    #[serde(rename = "internalTemp", default)]
-    pub internal_temp: Option<f64>,
     #[serde(rename = "ACGridCharging", default)]
     pub ac_grid_charging: Option<f64>,
 }
@@ -211,7 +207,6 @@ mod tests {
         let r: StorageDataResponse = serde_json::from_str(json).expect("storage");
         let b = &r.storage_data.batteries[0];
         assert_eq!(b.latest(|t| t.ac_grid_charging), Some(120.0));
-        assert_eq!(b.latest(|t| t.power), Some(120.0));
         assert_eq!(b.latest(|t| t.battery_state), Some(3));
         assert_eq!(b.latest(|t| t.full_pack_energy_available), Some(8950.0));
     }
