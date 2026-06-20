@@ -35,6 +35,21 @@ dashboard energy endpoint's `productionToBattery` / `consumptionFromBattery`.
 Caveat: `productionToBattery` is PV→battery only and excludes grid charging
 (tracked separately by `battery_ac_grid_charging_watt_hours`).
 
+**These lifetime gauges are modeled as label-less `Family`s (key `NoLabels`),
+not plain `Gauge`s, so they are _absent until the first successful fetch_ rather
+than defaulting to `0`.** A plain `Gauge` is registered at startup and scraped at
+`0` from process start until the first portal fetch lands; on a **lifetime**
+total that `0` poisons `increase()`/`rate()`, because PromQL's counter-reset
+compensation reads the restart transition `350k → 0 → 351k` as a reset and adds
+the full pre-reset ~350k to the window — fabricating a day of impossible
+charge/discharge (`increase([24h])` ≈ the whole lifetime). Absence has no
+downward step, so the math stays honest. **Do not "fix" this by renaming to a
+`_total` counter — the same compensation applies regardless of metric type or
+name.** `site_pv_lifetime_energy` (and the already-`Family` meter lifetime) use
+the same pattern; the `lifetime_gauges_absent_until_set` test in `metrics.rs`
+locks it in. (Historical `0`-dips already in the TSDB are not rewritten; the fix
+is forward-only.)
+
 ## Repo conventions (from `context.md`)
 
 - **Never `git commit`.** The user creates all commits. You may and should

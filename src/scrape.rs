@@ -5,7 +5,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
-use crate::metrics::{AppMetrics, OptimizerLabels, RefreshKind};
+use crate::metrics::{AppMetrics, NoLabels, OptimizerLabels, RefreshKind};
 use crate::portal::{FlatOptimizer, PortalClient};
 
 pub async fn run(
@@ -166,10 +166,16 @@ async fn refresh_once(
     // catches a drift instead of the gauges silently freezing.
     if let Some(be) = battery_energy.as_ref() {
         if let Some(v) = be.charged_watt_hours() {
-            metrics.battery_energy_charged.set(v);
+            metrics
+                .battery_energy_charged
+                .get_or_create(&NoLabels {})
+                .set(v);
         }
         if let Some(v) = be.discharged_watt_hours() {
-            metrics.battery_energy_discharged.set(v);
+            metrics
+                .battery_energy_discharged
+                .get_or_create(&NoLabels {})
+                .set(v);
         }
         metrics
             .last_refresh

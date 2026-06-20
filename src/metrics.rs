@@ -39,6 +39,15 @@ pub struct MonitoringEndpoint {
     pub endpoint: String,
 }
 
+/// Label set for a single, label-less site-level series. It exists only so the
+/// metric can be modeled as a `Family`, which (unlike a plain `Gauge`) renders
+/// *nothing* until a sample is created — see the comment on the lifetime energy
+/// fields below. Must be an empty *named* struct: the `EncodeLabelSet` derive
+/// rejects unit structs (`struct Foo;`) but accepts `struct Foo {}` and emits
+/// no labels for it.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct NoLabels {}
+
 pub struct AppMetrics {
     registry: Registry,
 
@@ -57,8 +66,18 @@ pub struct AppMetrics {
     // Site-level battery charge/discharge energy (from the portal dashboard
     // energy endpoint — the public storageData API reports these as 0 for
     // SolarEdge Home Battery 48V).
-    pub battery_energy_charged: Gauge<f64, AtomicU64>,
-    pub battery_energy_discharged: Gauge<f64, AtomicU64>,
+    //
+    // These are label-less *families*, not plain gauges, so that they are
+    // ABSENT (emit no sample) until the first successful portal fetch — a plain
+    // `Gauge` defaults to 0 and would be scraped at 0 between process start and
+    // that first fetch. A 0 sample on a lifetime total is poison for
+    // `increase()`/`rate()`: PromQL's counter-reset compensation reads the
+    // restart transition `350k -> 0 -> 351k` as a reset and adds the full
+    // pre-reset ~350k to the window, fabricating a day's worth of impossible
+    // charge/discharge. Absence has no such downward step. (Renaming to a
+    // `_total` counter does NOT help — the same compensation applies.)
+    pub battery_energy_charged: Family<NoLabels, Gauge<f64, AtomicU64>>,
+    pub battery_energy_discharged: Family<NoLabels, Gauge<f64, AtomicU64>>,
 
     // Battery (from /site/{id}/storageData)
     pub battery_ac_grid_charging: Family<BatteryLabels, Counter<f64, AtomicU64>>,
@@ -70,8 +89,9 @@ pub struct AppMetrics {
     // Site-level meter lifetime counters (from /site/{id}/meters)
     pub monitoring_meter_lifetime_energy: Family<MeterLabels, Gauge<f64, AtomicU64>>,
 
-    // Site PV lifetime (from /site/{id}/overview)
-    pub site_pv_lifetime_energy: Gauge<f64, AtomicU64>,
+    // Site PV lifetime (from /site/{id}/overview). Label-less family for the
+    // same absent-until-first-value reason as the battery energy fields above.
+    pub site_pv_lifetime_energy: Family<NoLabels, Gauge<f64, AtomicU64>>,
 
     // Public Monitoring API operational metrics
     pub monitoring_api_last_refresh: Family<MonitoringEndpoint, Gauge<f64, AtomicU64>>,
@@ -96,8 +116,8 @@ impl AppMetrics {
         let refresh_errors: Family<RefreshKind, Counter> = Family::default();
         let login_count = Counter::default();
 
-        let battery_energy_charged: Gauge<f64, AtomicU64> = Gauge::default();
-        let battery_energy_discharged: Gauge<f64, AtomicU64> = Gauge::default();
+        let battery_energy_charged: Family<NoLabels, Gauge<f64, AtomicU64>> = Family::default();
+        let battery_energy_discharged: Family<NoLabels, Gauge<f64, AtomicU64>> = Family::default();
         let battery_ac_grid_charging: Family<BatteryLabels, Counter<f64, AtomicU64>> =
             Family::default();
         let battery_full_pack_energy: Family<BatteryLabels, Gauge<f64, AtomicU64>> =
@@ -107,7 +127,7 @@ impl AppMetrics {
         let battery_state: Family<BatteryLabels, Gauge<f64, AtomicU64>> = Family::default();
         let monitoring_meter_lifetime_energy: Family<MeterLabels, Gauge<f64, AtomicU64>> =
             Family::default();
-        let site_pv_lifetime_energy: Gauge<f64, AtomicU64> = Gauge::default();
+        let site_pv_lifetime_energy: Family<NoLabels, Gauge<f64, AtomicU64>> = Family::default();
         let monitoring_api_last_refresh: Family<MonitoringEndpoint, Gauge<f64, AtomicU64>> =
             Family::default();
         let monitoring_api_refresh_duration: Family<MonitoringEndpoint, Gauge<f64, AtomicU64>> =
@@ -302,6 +322,40 @@ mod tests {
         assert!(
             out.contains("solaredge_portal_login_total"),
             "actual output:\n{out}"
+        );
+    }
+
+    #[test]
+    fn lifetime_gauges_absent_until_set() {
+        // Regression guard for the restart-to-0 phantom-increase bug: the
+        // lifetime energy series must emit NO sample (not 0) until the first
+        // real value, so `increase()`/`rate()` never see a 0-dip on restart.
+        let m = AppMetrics::new();
+        let before = m.encode().expect("encode");
+        assert!(
+            !before.contains("solaredge_battery_energy_charged_watt_hours 0"),
+            "lifetime gauge must not emit a 0 sample before first set:\n{before}"
+        );
+        // No sample line at all (HELP/TYPE may still be absent for empty families).
+        assert!(
+            !before.lines().any(
+                |l| l.starts_with("solaredge_battery_energy_charged_watt_hours ")
+                    || l.starts_with("solaredge_battery_energy_charged_watt_hours{")
+            ),
+            "lifetime gauge must be absent before first set:\n{before}"
+        );
+
+        m.battery_energy_charged
+            .get_or_create(&NoLabels {})
+            .set(123.0);
+        let after = m.encode().expect("encode");
+        assert!(
+            after.contains("solaredge_battery_energy_charged_watt_hours"),
+            "metric name must appear after set:\n{after}"
+        );
+        assert!(
+            after.contains("123"),
+            "value must appear after set:\n{after}"
         );
     }
 

@@ -6,7 +6,7 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::metrics::{AppMetrics, BatteryLabels, MeterLabels, MonitoringEndpoint};
+use crate::metrics::{AppMetrics, BatteryLabels, MeterLabels, MonitoringEndpoint, NoLabels};
 use crate::monitoring_api::client::{MonitoringApiClient, MonitoringApiError};
 
 /// Bring the Prometheus counter up to the persisted value for each battery
@@ -74,7 +74,10 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
     if let Some(r) = overview.as_ref()
         && let Some(wh) = r.overview.life_time_data.energy
     {
-        metrics.site_pv_lifetime_energy.set(wh);
+        metrics
+            .site_pv_lifetime_energy
+            .get_or_create(&NoLabels {})
+            .set(wh);
     }
 
     if let Some(r) = meters.as_ref() {
