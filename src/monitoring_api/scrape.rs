@@ -74,10 +74,11 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
     if let Some(r) = overview.as_ref()
         && let Some(wh) = r.overview.life_time_data.energy
     {
-        metrics
-            .site_pv_lifetime_energy
-            .get_or_create(&NoLabels {})
-            .set(wh);
+        crate::metrics::set_lifetime_monotonic(
+            &metrics.site_pv_lifetime_energy.get_or_create(&NoLabels {}),
+            wh,
+            "site_pv_lifetime",
+        );
     }
 
     if let Some(r) = meters.as_ref() {
@@ -90,10 +91,13 @@ async fn refresh_once(client: &MonitoringApiClient, metrics: &AppMetrics) {
                 inverter: meter.connected_solaredge_device_sn.clone(),
                 r#type: meter.meter_type.clone(),
             };
-            metrics
-                .monitoring_meter_lifetime_energy
-                .get_or_create(&labels)
-                .set(value);
+            crate::metrics::set_lifetime_monotonic(
+                &metrics
+                    .monitoring_meter_lifetime_energy
+                    .get_or_create(&labels),
+                value,
+                &format!("meter:{}", meter.meter_type),
+            );
         }
     }
 

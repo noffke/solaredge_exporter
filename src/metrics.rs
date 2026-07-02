@@ -48,6 +48,34 @@ pub struct MonitoringEndpoint {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct NoLabels {}
 
+/// Set a lifetime-energy gauge *monotonically*: never store a value below the
+/// highest already seen (the gauge's own current value is the running max, so
+/// no extra state is needed). SolarEdge's upstream lifetime aggregates
+/// occasionally recompute and walk backward for a few hours before recovering;
+/// a bare `.set()` would faithfully emit that downward step, which PromQL reads
+/// as a counter reset and compensates for by adding the pre-reset total back
+/// into the window — roughly *doubling* `increase()`/`rate()` over any range
+/// spanning the dip. Clamping to the running max keeps the series
+/// non-decreasing. This is the mid-run counterpart to the absent-until-set
+/// `Family` design below (which only guards the restart-to-0 dip).
+///
+/// A suppressed step is logged at WARN with the held vs. incoming value so a
+/// *genuine* large drop (site reset, meter swap, `/services/` schema drift)
+/// stays visible rather than being silently masked.
+pub fn set_lifetime_monotonic(gauge: &Gauge<f64, AtomicU64>, value: f64, series: &str) {
+    let current = gauge.get();
+    if value < current {
+        tracing::warn!(
+            series,
+            current,
+            incoming = value,
+            "upstream lifetime value stepped backward; holding previous max to keep the series monotonic"
+        );
+        return;
+    }
+    gauge.set(value);
+}
+
 pub struct AppMetrics {
     registry: Registry,
 
@@ -76,6 +104,11 @@ pub struct AppMetrics {
     // pre-reset ~350k to the window, fabricating a day's worth of impossible
     // charge/discharge. Absence has no such downward step. (Renaming to a
     // `_total` counter does NOT help — the same compensation applies.)
+    //
+    // Absent-until-set only guards the restart-to-0 dip. A *mid-run* downward
+    // step (SolarEdge's lifetime aggregate recomputing backward for a few hours)
+    // is guarded separately by writing these via `set_lifetime_monotonic`, which
+    // clamps to the running max so the series can never step down.
     pub battery_energy_charged: Family<NoLabels, Gauge<f64, AtomicU64>>,
     pub battery_energy_discharged: Family<NoLabels, Gauge<f64, AtomicU64>>,
 
@@ -341,6 +374,26 @@ mod tests {
             after.contains("123"),
             "value must appear after set:\n{after}"
         );
+    }
+
+    #[test]
+    fn lifetime_clamp_holds_on_downward_step() {
+        // A monotonic lifetime series must never step down mid-run: SolarEdge's
+        // upstream aggregate sometimes recomputes backward for a few hours, and
+        // a downward step is read by PromQL as a counter reset (doubling
+        // increase()/rate() over the spanning window). set_lifetime_monotonic
+        // clamps to the running max so the stored value only ever climbs.
+        let m = AppMetrics::new();
+        let g = m.site_pv_lifetime_energy.get_or_create(&NoLabels {});
+
+        set_lifetime_monotonic(&g, 350_000.0, "test");
+        assert_eq!(g.get(), 350_000.0, "first value should set");
+
+        set_lifetime_monotonic(&g, 349_000.0, "test");
+        assert_eq!(g.get(), 350_000.0, "downward step must be held at the max");
+
+        set_lifetime_monotonic(&g, 351_000.0, "test");
+        assert_eq!(g.get(), 351_000.0, "a higher value must be accepted");
     }
 
     #[test]

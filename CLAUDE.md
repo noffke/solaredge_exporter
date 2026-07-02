@@ -50,6 +50,19 @@ the same pattern; the `lifetime_gauges_absent_until_set` test in `metrics.rs`
 locks it in. (Historical `0`-dips already in the TSDB are not rewritten; the fix
 is forward-only.)
 
+Absent-until-set only guards the **restart-to-0** dip. A **mid-run** downward
+step — SolarEdge's upstream lifetime aggregate recomputing backward for a few
+hours before recovering — would still emit a phantom reset. So every lifetime
+gauge is written through `metrics::set_lifetime_monotonic`, which clamps the
+value to the gauge's own running max (never storing a value below the highest
+seen) and logs a WARN when it suppresses a downward step. This covers
+`site_pv_lifetime_energy`, `monitoring_meter_lifetime_energy`, and the portal
+`battery_energy_charged` / `_discharged`; the `lifetime_clamp_holds_on_downward_step`
+test locks it in. No new state is needed (the gauge is the max store), so the
+clamp is in-memory only — after a restart the running max resets, but
+absent-until-set handles the clean restart and a restart landing inside a rare
+dip window self-heals on recovery.
+
 ## Repo conventions (from `context.md`)
 
 - **Never `git commit`.** The user creates all commits. You may and should

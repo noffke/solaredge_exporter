@@ -166,16 +166,20 @@ async fn refresh_once(
     // catches a drift instead of the gauges silently freezing.
     if let Some(be) = battery_energy.as_ref() {
         if let Some(v) = be.charged_watt_hours() {
-            metrics
-                .battery_energy_charged
-                .get_or_create(&NoLabels {})
-                .set(v);
+            crate::metrics::set_lifetime_monotonic(
+                &metrics.battery_energy_charged.get_or_create(&NoLabels {}),
+                v,
+                "battery_energy_charged",
+            );
         }
         if let Some(v) = be.discharged_watt_hours() {
-            metrics
-                .battery_energy_discharged
-                .get_or_create(&NoLabels {})
-                .set(v);
+            crate::metrics::set_lifetime_monotonic(
+                &metrics
+                    .battery_energy_discharged
+                    .get_or_create(&NoLabels {}),
+                v,
+                "battery_energy_discharged",
+            );
         }
         metrics
             .last_refresh
