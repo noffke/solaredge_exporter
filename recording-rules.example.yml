@@ -119,6 +119,10 @@ groups:
             - sum(solaredge_meter_ac_energy_watt_hours{job="solaredge_sunspec_exporter", direction="exported", phase="total"})
           ) / 1000
 
+      # NOTE: counts ALL battery discharge to load as saved PV. If the battery is
+      # ever AC-grid-charged (see charge_manager's battery_management.md "AC (grid)
+      # charging" section), grid-sourced kWh discharged later inflate this — subtract
+      # `solaredge_battery_ac_grid_charging_watt_hours_total` here. See CAVEATS above.
       - record: pv:battery_self_consumption_lifetime_kwh
         expr: |
           sum(solaredge_battery_energy_discharged_watt_hours{job="solaredge_exporter"}) / 1000
