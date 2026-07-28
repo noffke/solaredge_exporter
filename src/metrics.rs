@@ -212,7 +212,7 @@ impl AppMetrics {
         );
         registry.register(
             "portal_login",
-            "Count of SolarEdge portal (re)logins",
+            "Count of Cognito SRP logins for the portal /services/ API (token lives ~24h)",
             login_count.clone(),
         );
 
@@ -394,6 +394,66 @@ mod tests {
 
         set_lifetime_monotonic(&g, 351_000.0, "test");
         assert_eq!(g.get(), 351_000.0, "a higher value must be accepted");
+    }
+
+    #[test]
+    fn lifetime_clamp_is_per_label_set() {
+        // `energy_today` is a *lifetime* total per optimizer (the name predates
+        // the `timeUnit=ALL` semantics), so it also goes through the clamp. The
+        // running max must be tracked per label set — one optimizer's high
+        // reading must never floor another's.
+        let m = AppMetrics::new();
+        let labels_a = OptimizerLabels {
+            optimizer: "OPT1".into(),
+            display_name: "1.1.1".into(),
+            inverter: "INV1".into(),
+            field: "Carport".into(),
+        };
+        let labels_b = OptimizerLabels {
+            optimizer: "OPT2".into(),
+            display_name: "1.1.2".into(),
+            inverter: "INV1".into(),
+            field: "Carport".into(),
+        };
+
+        // NOTE: `get_or_create` returns a guard holding a *read* lock on the
+        // family's label map, and creating a new label set needs the *write*
+        // lock. Never hold two of these guards at once — bind each to a
+        // statement-local temporary that drops at the semicolon, exactly as the
+        // scrape commit loop does.
+        set_lifetime_monotonic(
+            &m.energy_today.get_or_create(&labels_a),
+            500_000.0,
+            "optimizer_energy_today",
+        );
+        set_lifetime_monotonic(
+            &m.energy_today.get_or_create(&labels_b),
+            1_000.0,
+            "optimizer_energy_today",
+        );
+        assert_eq!(m.energy_today.get_or_create(&labels_a).get(), 500_000.0);
+        assert_eq!(
+            m.energy_today.get_or_create(&labels_b).get(),
+            1_000.0,
+            "a low reading on one optimizer must not be clamped by another's max"
+        );
+
+        // And each still clamps independently.
+        set_lifetime_monotonic(
+            &m.energy_today.get_or_create(&labels_b),
+            900.0,
+            "optimizer_energy_today",
+        );
+        assert_eq!(
+            m.energy_today.get_or_create(&labels_b).get(),
+            1_000.0,
+            "downward step held for this label set"
+        );
+        assert_eq!(
+            m.energy_today.get_or_create(&labels_a).get(),
+            500_000.0,
+            "unrelated label set untouched"
+        );
     }
 
     #[test]

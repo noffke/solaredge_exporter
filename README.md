@@ -7,17 +7,21 @@ exporter that handles site/inverter/meter-level power and SoC.
 
 Two upstream sources are combined:
 
-1. **Undocumented portal endpoints** at `monitoring.solaredge.com` (pioneered by
-   [ProudElm/solaredgeoptimizers][upstream-ha]) — per-optimizer live telemetry,
+1. **Undocumented portal endpoints** at `monitoring.solaredge.com` — the
+   SolarEdge ONE `/services/` API (pioneered by
+   [AndrewTapp/solaredgeoptimizers][upstream-ha]) — per-optimizer live telemetry,
    plus site-level battery charge/discharge energy from the dashboard energy
-   service. No hard request budget, refreshes every ~15 min.
+   service. No hard request budget, refreshes every ~15 min. The older
+   `/solaredge-apigw/` + `/solaredge-web/` endpoints this project originally used
+   were retired by SolarEdge in July 2026; see
+   [the shutdown notes](#the-july-2026-legacy-api-shutdown).
 2. **Public Monitoring API** at `monitoringapi.solaredge.com` — battery
    grid-charging counter, current full-pack energy / power / temp / state,
    site meter lifetime energy, and site PV lifetime energy. Rate-limited to
    **300 requests/day**; we poll three endpoints every 30 min by default
    (~144 calls/day).
 
-[upstream-ha]: https://github.com/ProudElm/solaredgeoptimizers
+[upstream-ha]: https://github.com/AndrewTapp/solaredgeoptimizers
 
 ## Configuration
 
@@ -240,12 +244,17 @@ Operational metrics:
 ## Bootstrapping field mappings
 
 On startup the exporter fetches the site layout once and logs every discovered
-optimizer (inverter serial, optimizer serial, display name, reporter ID) at
+optimizer (inverter serial, optimizer serial, display name, layout status) at
 `INFO`. Run it once with an empty `[[fields]]` list, grep the log for
 `"optimizer"` entries, copy serials into `config.toml`, and restart.
 
 Optimizers not listed in any field are still exported with label
 `field="unassigned"`, so nothing is silently dropped.
+
+If the layout fetch fails, the exporter logs the error, increments
+`solaredge_refresh_errors_total{kind="layout"}` and **starts anyway** with no
+optimizer metrics — the battery, meter and site-PV metrics come from the separate
+public API and are unaffected.
 
 ## Run
 
@@ -350,10 +359,11 @@ exporter logs and see *why* immediately. The trip conditions and their logs:
 | Alert | Log line (level `WARN`) |
 | --- | --- |
 | `SolarEdgeExporterDown` / `…Absent` | *(none — the process is dead/unreachable; absence of logs is the signal)* |
-| `SolarEdgePortalDataStale{kind="telemetry"}` | `no optimizer telemetry committed this cycle…` (and/or per-optimizer `fetch_optimizer failed` on HTTP errors) |
-| `SolarEdgePortalDataStale{kind="energy"}` | `fetch_energy failed; continuing without lifetime energy` |
+| `SolarEdgePortalDataStale{kind="telemetry"}` | `no optimizer telemetry committed this cycle…` (and/or `fetch_optimizers_live failed…` on HTTP errors) |
+| `SolarEdgePortalDataStale{kind="energy"}` | `fetch_optimizer_energy failed; leaving its energy gauge unchanged` |
 | `SolarEdgePortalDataStale{kind="battery_energy"}` / `SolarEdgeBatteryEnergyMissing` | `fetch_battery_energy failed or returned no usable data…` (HTTP/Cognito error, **or** a parsed-but-empty 200 — the error then carries the response body) |
-| `SolarEdgePortalRefreshErrors{kind}` | the per-source lines above (optimizer / energy / battery_energy) |
+| `SolarEdgeOptimizerMetricsMissing` / `SolarEdgePortalRefreshErrors{kind="layout"}` | `fetch_site_structure failed; continuing WITHOUT optimizer metrics…` — the startup layout fetch failed, so there are no optimizer series at all (by design: the other metrics stay up). The `{kind="layout"}` counter only moves once at startup, so the `…MetricsMissing` rule is what keeps alerting. |
+| `SolarEdgePortalRefreshErrors{kind}` | the per-source lines above (layout / optimizer / energy / battery_energy) |
 | `SolarEdgeMonitoringApiRefreshErrors{endpoint}` / `…DataStale` | `monitoring_api fetch failed or returned no usable data…` (carries the `endpoint` field; **EmptyResponse** errors include the body) |
 | `SolarEdgeApiBudgetHigh` | startup `monitoring_api.refresh_seconds is low…` |
 
@@ -363,8 +373,7 @@ lacks the expected fields, raising an **`EmptyResponse` error that carries the
 (truncated) response body** — so the `WARN` already contains the body you need to
 diff, no reconfiguration required. It also only advances each source's
 `…_last_refresh_timestamp_seconds` on a real value, so the staleness alert fires.
-For the *full* body (or for the per-optimizer `systemData` responses, which are
-logged per panel), raise this crate's log level — see below.
+For the *full* body, raise this crate's log level — see below.
 
 ## Debugging portal responses
 
@@ -377,9 +386,11 @@ RUST_LOG=info,solaredge_exporter=debug cargo run -- --config config.toml
 # Docker: add  -e RUST_LOG=info,solaredge_exporter=debug
 ```
 
-`login`, `layout/logical`, `systemData` (one per optimizer), `layout/energy`,
+`layout/v2`, `layout/optimizers`, `layout/energy-graph` (one per optimizer),
 `dashboard/energy`, and the public API's `overview`/`meters`/`storage` bodies
 appear verbatim — exactly what to diff against when an endpoint changes shape.
+Those are the `endpoint=` field values on each logged response, and the same
+labels appear in `PortalError`, so a WARN names the endpoint that broke.
 
 **Capturing a body after an alert fires.** You don't need DEBUG enabled *before*
 a break: an API that changed stays changed, so just raise the level and wait one
@@ -393,34 +404,57 @@ already in the default-level `WARN`, so often you don't even need this step.
 port of a Python library; if SolarEdge changes an endpoint, diff against the
 upstream Python file to see what moved.
 
-- HA integration (entry point): <https://github.com/ProudElm/solaredgeoptimizers>
-- PyPI library with the actual HTTP logic:
-  <https://github.com/ProudElm/packaging_solaredgeoptimizers/blob/main/src/solaredgeoptimizers/solaredgeoptimizers.py>
+- Active fork, implements the same `/services/` API we target:
+  <https://github.com/AndrewTapp/solaredgeoptimizers>
+- The HTTP logic lives in
+  <https://github.com/AndrewTapp/solaredgeoptimizers/blob/main/custom_components/solaredgeoptimizers/solaredge_one_api.py>
+- Original project the first version was ported from, **dormant since 2023 and
+  never fixed for the July 2026 shutdown** — kept for history only:
+  <https://github.com/ProudElm/solaredgeoptimizers>
 
 ### Ported from upstream commit
 
-`0278ba2fd19feff62994660e68387c07c3494235` (dated 2023-04-21).
+`9f1376bd2553a8b60ad762e2606441079030e0ba` (dated 2026-07-03).
 
 To see what upstream has changed since the port:
 
 ```sh
-git -C /tmp clone https://github.com/ProudElm/packaging_solaredgeoptimizers
-git -C /tmp/packaging_solaredgeoptimizers \
-    diff 0278ba2fd19feff62994660e68387c07c3494235 HEAD \
-    -- src/solaredgeoptimizers/solaredgeoptimizers.py
+git -C /tmp clone https://github.com/AndrewTapp/solaredgeoptimizers
+git -C /tmp/solaredgeoptimizers \
+    diff 9f1376bd2553a8b60ad762e2606441079030e0ba HEAD \
+    -- custom_components/solaredgeoptimizers/solaredge_one_api.py
 ```
+
+### The July 2026 legacy-API shutdown
+
+On ~2026-07-21 SolarEdge retired the old portal API without notice.
+`GET /solaredge-apigw/api/sites/{siteId}/layout/logical` returns **HTTP 410 Gone**
+with a body containing only
+`https://marketing.solaredge.com/legacy-api-sign-up-for-interest`, and
+`/solaredge-web/p/login` now 301s to the new `/one` SPA. The 410 is served at the
+CDN edge *before* authentication, so it is not a credentials problem.
+
+This exporter has moved to the **SolarEdge ONE `/services/` API**, which is gated
+by the same AWS Cognito app client we already authenticated against for the
+battery-energy endpoint — so the migration needed no new credentials or setup.
+Per-optimizer data is now keyed by **serial number**; the old numeric
+`reporterId` no longer exists anywhere in the API or this codebase.
+
+Separately, the **public** Monitoring API (`monitoringapi.solaredge.com`) is
+announced for deprecation on **2026-11-01** per
+<https://api-docs.solaredge.com/>, to be replaced by an OAuth-based V2 API on the
+ONE platform. No V2 spec is published yet. The battery, meter and site-PV metrics
+here depend on V1.
 
 ### Endpoints (as currently used)
 
-All on `monitoring.solaredge.com` (the old `monitoringpublic` host returns 403
-for `publicSystemData` as of 2026-04; the migration is tracked in upstream
-[PR #13]).
+All on `monitoring.solaredge.com`, all authenticated with the Cognito access
+token (sent both as an `Authorization: Bearer` header and as the
+`se_monitoring_auth` cookie). HTTP Basic auth is no longer used anywhere.
 
-| Endpoint | Auth | Purpose |
-| --- | --- | --- |
-| `GET /solaredge-web/p/login` | Basic | warm session cookies (JSESSIONID, CSRF-TOKEN) |
-| `GET /solaredge-apigw/api/sites/{siteId}/layout/logical` | Basic | inverter → string → optimizer tree |
-| `GET /solaredge-web/p/systemData?reporterId=…&type=panel&fieldId={siteId}&isPublic=false&v={ms}` | Basic | per-optimizer live measurements |
-| `POST /solaredge-apigw/api/sites/{siteId}/layout/energy?timeUnit=ALL` | Basic + CSRF cookie + `Content-Type: application/json` | per-optimizer lifetime energy |
-
-[PR #13]: https://github.com/ProudElm/packaging_solaredgeoptimizers/pull/13
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /services/layout/logical/generic/v2/site/{siteId}?include-optimizers=true` | inverter → string → optimizer tree |
+| `POST /services/layout/information/optimizers` (body: `["<serial>", …]`) | live measurements for **every** optimizer in one call |
+| `GET /services/layout/energy-graph/site/{siteId}/optimizers?…&optimizer-serials=…` | per-optimizer lifetime energy (one call per optimizer — `totalEnergy` is a single scalar for whatever serials it is given) |
+| `GET /services/dashboard/energy/sites/{siteId}?…` | site battery charge/discharge energy |

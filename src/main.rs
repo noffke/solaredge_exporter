@@ -16,9 +16,9 @@ use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::config::Config;
-use crate::metrics::AppMetrics;
+use crate::metrics::{AppMetrics, RefreshKind};
 use crate::monitoring_api::MonitoringApiClient;
-use crate::portal::{Credentials, PortalClient, Secret, flatten_layout};
+use crate::portal::{Credentials, PortalClient, Secret, flatten_layout_v2};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,7 +69,10 @@ fn load_api_key() -> Result<Secret> {
     Ok(Secret::new(key))
 }
 
-fn log_layout_tree(optimizers: &[portal::FlatOptimizer]) {
+/// `fetch_ok` distinguishes "the layout came back but was empty" from "the fetch
+/// itself failed" — both leave an empty list, but they need different advice and
+/// the failure case has already logged its own ERROR just above.
+fn log_layout_tree(optimizers: &[portal::FlatOptimizer], fetch_ok: bool) {
     info!(
         count = optimizers.len(),
         "discovered optimizers from layout"
@@ -80,13 +83,14 @@ fn log_layout_tree(optimizers: &[portal::FlatOptimizer]) {
             inverter_name = %opt.inverter_display_name,
             optimizer = %opt.serial_number,
             display_name = %opt.display_name,
-            reporter_id = opt.reporter_id,
+            status = %opt.status,
             "optimizer"
         );
     }
-    if optimizers.is_empty() {
+    if optimizers.is_empty() && fetch_ok {
         warn!(
-            "no optimizers found in layout — check that the site_id is correct and the user has access"
+            "layout fetch succeeded but contained no optimizers — check that the site_id is \
+             correct and the user has access"
         );
     }
 }
@@ -119,13 +123,43 @@ async fn main() -> Result<()> {
         config.monitoring_api.state_file.clone(),
     )?);
 
-    // One-shot layout fetch. Fail loudly — there's no useful work without it.
-    info!("fetching site layout");
-    let layout = client.fetch_layout().await.context("fetch_layout failed")?;
-    let optimizers = Arc::new(flatten_layout(&layout));
-    log_layout_tree(&optimizers);
-
     let metrics = Arc::new(AppMetrics::new());
+
+    // One-shot layout fetch. Deliberately NOT fatal: nothing outside the
+    // optimizer metrics depends on the layout, so a portal-side breakage must
+    // not take down the battery/meter/site-PV metrics, which come from the
+    // separate public API, nor the HTTP server itself. (SolarEdge retired the
+    // old `layout/logical` endpoint outright in July 2026 — HTTP 410 — and that
+    // aborted startup entirely.) A failure here leaves the optimizer list empty.
+    //
+    // Visibility: `refresh_errors{kind="layout"}` records it, but only moves once
+    // (this is a one-shot startup fetch), so an `increase()`-based alert goes
+    // quiet after its window. The `telemetry` staleness alert can't cover the gap
+    // either — with zero optimizers that series never appears at all. The
+    // persistent signal is `SolarEdgeOptimizerMetricsMissing` in
+    // `monitoring/solaredge_monitoring.rules.yml`, which alerts on the *absence*
+    // of `solaredge_optimizer_power_watts`.
+    info!("fetching site layout");
+    let mut layout_fetch_ok = true;
+    let optimizers = Arc::new(match client.fetch_site_structure().await {
+        Ok(structure) => flatten_layout_v2(&structure),
+        Err(e) => {
+            layout_fetch_ok = false;
+            error!(
+                error = %e,
+                "fetch_site_structure failed; continuing WITHOUT optimizer metrics. \
+                 Battery, meter and site-PV metrics are unaffected."
+            );
+            metrics
+                .refresh_errors
+                .get_or_create(&RefreshKind {
+                    kind: "layout".into(),
+                })
+                .inc();
+            Vec::new()
+        }
+    });
+    log_layout_tree(&optimizers, layout_fetch_ok);
 
     // Seed the persistent grid-charging counter from disk state before any
     // scrape task or HTTP server sees the registry.

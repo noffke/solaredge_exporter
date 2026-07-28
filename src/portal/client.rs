@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use reqwest::cookie::{CookieStore, Jar};
+use reqwest::cookie::Jar;
 use reqwest::{StatusCode, Url};
 use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::portal::cognito;
 use crate::portal::models::{
-    DashboardEnergyResponse, EnergyResponse, LayoutResponse, OptimizerData,
+    DashboardEnergyResponse, EnergyGraphResponse, LayoutNodeV2, OptimizersInfoResponse,
 };
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -17,6 +17,10 @@ const ORIGIN: &str = "https://monitoring.solaredge.com";
 /// battery flow); keeping it fixed makes the resulting cumulative totals
 /// monotonic. 2015 predates the SolarEdge Home Battery line.
 const BATTERY_ENERGY_START_DATE: &str = "2015-01-01";
+/// Fixed lower bound for the per-optimizer lifetime energy window, same
+/// rationale as `BATTERY_ENERGY_START_DATE`: a wide fixed window keeps the
+/// returned cumulative total monotonic across refreshes.
+const OPTIMIZER_ENERGY_START_DATE: &str = "2010-01-01";
 
 pub struct Secret(String);
 
@@ -57,8 +61,6 @@ pub enum PortalError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("missing CSRF token cookie after login")]
-    MissingCsrf,
     #[error("Cognito auth failed: {0}")]
     CognitoAuth(String),
     #[error(
@@ -85,6 +87,7 @@ pub struct PortalClient {
 }
 
 struct SeMonitoringAuth {
+    access_token: String,
     expires_at: jiff::Timestamp,
 }
 
@@ -105,176 +108,27 @@ impl PortalClient {
         })
     }
 
-    /// Warm the cookie jar with JSESSIONID + CSRF-TOKEN. Required before calling
-    /// `fetch_energy`, optional otherwise — the layout and publicSystemData
-    /// endpoints accept HTTP Basic auth without cookies.
-    pub async fn login(&self) -> Result<(), PortalError> {
-        let url = format!("{ORIGIN}/solaredge-web/p/login");
-        let resp = self
-            .http
-            .get(&url)
-            .basic_auth(&self.creds.username, Some(self.creds.password.expose()))
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        debug!(
-            endpoint = "login",
-            status = %status,
-            body = text.as_str(),
-            "portal response"
-        );
-        if !status.is_success() && !status.is_redirection() {
-            return Err(PortalError::Status {
-                endpoint: "login",
-                status,
-                body: truncate(&text),
-            });
-        }
-        info!("logged in to SolarEdge portal");
-        Ok(())
-    }
-
-    pub async fn fetch_layout(&self) -> Result<LayoutResponse, PortalError> {
-        let url = format!(
-            "{ORIGIN}/solaredge-apigw/api/sites/{}/layout/logical",
-            self.site_id
-        );
-        let resp = self
-            .http
-            .get(&url)
-            .basic_auth(&self.creds.username, Some(self.creds.password.expose()))
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        debug!(
-            endpoint = "layout/logical",
-            status = %status,
-            body = text.as_str(),
-            "portal response"
-        );
-        if !status.is_success() {
-            return Err(PortalError::Status {
-                endpoint: "layout/logical",
-                status,
-                body: truncate(&text),
-            });
-        }
-        serde_json::from_str(&text).map_err(|e| PortalError::Json {
-            endpoint: "layout/logical",
-            source: e,
-        })
-    }
-
-    /// Returns `Ok(None)` when the optimizer has no measurements yet (fresh install
-    /// or night-time with no historical data), matching the Python reference's
-    /// "skip empty `lastMeasurementDate`" behaviour.
-    ///
-    /// Endpoint matches upstream PR #13 (moved from `monitoringpublic.solaredge.com/publicSystemData`
-    /// to `monitoring.solaredge.com/systemData` with a millis cache-buster).
-    pub async fn fetch_optimizer(
-        &self,
-        reporter_id: i64,
-    ) -> Result<Option<OptimizerData>, PortalError> {
-        let v = jiff::Timestamp::now().as_millisecond();
-        // locale=en_US: force English measurement keys (Power/Voltage/Current)
-        // and dot-decimal numeric strings; otherwise the portal honours the
-        // user's account locale (e.g. German "Leistung"/"252,19").
-        let url = format!(
-            "{ORIGIN}/solaredge-web/p/systemData?reporterId={reporter_id}&type=panel&activeTab=0&fieldId={}&isPublic=false&locale=en_US&v={v}",
-            self.site_id
-        );
-        let resp = self
-            .http
-            .get(&url)
-            .basic_auth(&self.creds.username, Some(self.creds.password.expose()))
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        debug!(
-            endpoint = "systemData",
-            reporter_id,
-            status = %status,
-            body = text.as_str(),
-            "portal response"
-        );
-        if !status.is_success() {
-            return Err(PortalError::Status {
-                endpoint: "publicSystemData",
-                status,
-                body: truncate(&text),
-            });
-        }
-        let data: OptimizerData = extract_json(&text).map_err(|e| match e {
-            PortalError::Json { source, .. } => PortalError::Json {
-                endpoint: "publicSystemData",
-                source,
-            },
-            other => other,
-        })?;
-        if data.last_measurement_date.trim().is_empty() {
-            debug!(reporter_id, "optimizer has no measurements yet; skipping");
-            return Ok(None);
-        }
-        Ok(Some(data))
-    }
-
-    pub async fn fetch_energy(&self) -> Result<EnergyResponse, PortalError> {
-        // Energy endpoint needs cookies + CSRF header. Login warms the jar.
-        self.login().await?;
-        let csrf = self.csrf_token().ok_or(PortalError::MissingCsrf)?;
-        let url = format!(
-            "{ORIGIN}/solaredge-apigw/api/sites/{}/layout/energy?timeUnit=ALL",
-            self.site_id
-        );
-        let resp = self
-            .http
-            .post(&url)
-            .basic_auth(&self.creds.username, Some(self.creds.password.expose()))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("X-CSRF-Token", csrf)
-            .header("X-Requested-With", "XMLHttpRequest")
-            .header(
-                reqwest::header::REFERER,
-                format!("{ORIGIN}/solaredge-web/p/site/{}/", self.site_id),
-            )
-            .header(reqwest::header::ORIGIN, ORIGIN)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        debug!(
-            endpoint = "layout/energy",
-            status = %status,
-            body = text.as_str(),
-            "portal response"
-        );
-        if !status.is_success() {
-            return Err(PortalError::Status {
-                endpoint: "layout/energy",
-                status,
-                body: truncate(&text),
-            });
-        }
-        serde_json::from_str(&text).map_err(|e| PortalError::Json {
-            endpoint: "layout/energy",
-            source: e,
-        })
-    }
-
     /// Ensure a valid `se_monitoring_auth` cookie is in the jar, performing the
     /// Cognito SRP login when the cached token is missing or about to expire.
     /// The access token is long-lived (~24 h), so this hits Cognito at most
     /// once a day; every other refresh cycle is a no-op.
-    async fn ensure_se_monitoring_auth(&self) -> Result<(), PortalError> {
+    ///
+    /// Returns the access token so callers can also send it as a bearer header —
+    /// the `/services/layout/` endpoints authenticate on `Authorization`, while
+    /// `/services/dashboard/` accepts the cookie. We send both everywhere.
+    ///
+    /// `fresh_login` reports whether this call actually performed an SRP
+    /// handshake, so the caller can count real logins.
+    async fn ensure_se_monitoring_auth(&self) -> Result<ServicesAuth, PortalError> {
         let mut guard = self.se_monitoring_auth.lock().await;
         let now = jiff::Timestamp::now();
         if let Some(s) = guard.as_ref()
             && s.expires_at > now
         {
-            return Ok(());
+            return Ok(ServicesAuth {
+                access_token: s.access_token.clone(),
+                fresh_login: false,
+            });
         }
         let tokens = cognito::login(
             &self.http,
@@ -290,37 +144,146 @@ impl PortalClient {
         let url = Url::parse(ORIGIN).map_err(|e| PortalError::Parse(e.to_string()))?;
         self.jar
             .add_cookie_str(&format!("se_monitoring_auth={}", tokens.access_token), &url);
-        *guard = Some(SeMonitoringAuth { expires_at });
+        *guard = Some(SeMonitoringAuth {
+            access_token: tokens.access_token.clone(),
+            expires_at,
+        });
         info!("obtained se_monitoring_auth via Cognito SRP");
-        Ok(())
+        Ok(ServicesAuth {
+            access_token: tokens.access_token,
+            fresh_login: true,
+        })
+    }
+
+    /// Common header set for the `/services/` platform. The new API is stricter
+    /// than the retired one: it wants the bearer token, JSON content
+    /// negotiation, and a same-origin `Origin`/`Referer` pair.
+    fn services_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
+        builder
+            .bearer_auth(token)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ORIGIN, ORIGIN)
+            .header(reqwest::header::REFERER, format!("{ORIGIN}/"))
+    }
+
+    /// Read a `/services/` JSON response, mapping non-2xx and decode failures
+    /// onto `PortalError` with a stable endpoint label.
+    async fn services_json<T: serde::de::DeserializeOwned>(
+        resp: reqwest::Response,
+        endpoint: &'static str,
+    ) -> Result<T, PortalError> {
+        let status = resp.status();
+        let text = resp.text().await?;
+        debug!(
+            endpoint,
+            status = %status,
+            body = text.as_str(),
+            "portal response"
+        );
+        if !status.is_success() {
+            return Err(PortalError::Status {
+                endpoint,
+                status,
+                body: truncate(&text),
+            });
+        }
+        // `/services/` returns clean JSON — no need for the junk-tolerant
+        // scanner the retired `systemData` endpoint required.
+        serde_json::from_str(&text).map_err(|e| PortalError::Json {
+            endpoint,
+            source: e,
+        })
+    }
+
+    /// The site's logical layout (inverter → string → optimizer) from the ONE
+    /// platform. Replaces the retired
+    /// `GET /solaredge-apigw/api/sites/{id}/layout/logical`, which has returned
+    /// HTTP 410 Gone since ~2026-07-21.
+    pub async fn fetch_site_structure(&self) -> Result<LayoutNodeV2, PortalError> {
+        let auth = self.ensure_se_monitoring_auth().await?;
+        let url = format!(
+            "{ORIGIN}/services/layout/logical/generic/v2/site/{}?include-optimizers=true",
+            self.site_id
+        );
+        let resp = self
+            .services_request(self.http.get(&url), &auth.access_token)
+            .send()
+            .await?;
+        Self::services_json(resp, "layout/v2").await
+    }
+
+    /// Live telemetry for every optimizer in **one** request, keyed by serial.
+    /// Replaces the retired per-optimizer `systemData` GET (one HTTP call per
+    /// optimizer, 18 on this site).
+    ///
+    /// Retries once on timeout: this is now a single point of failure for the
+    /// whole optimizer fleet, so one cheap retry is worth more than it was when
+    /// each optimizer had its own request.
+    pub async fn fetch_optimizers_live(
+        &self,
+        serials: &[String],
+    ) -> Result<OptimizersInfoResponse, PortalError> {
+        let auth = self.ensure_se_monitoring_auth().await?;
+        let url = format!("{ORIGIN}/services/layout/information/optimizers");
+        let post = || async {
+            self.services_request(self.http.post(&url), &auth.access_token)
+                .json(&serials)
+                .send()
+                .await
+        };
+        let resp = match post().await {
+            Err(e) if e.is_timeout() => {
+                debug!(error = %e, "optimizer batch timed out; retrying once");
+                post().await?
+            }
+            other => other?,
+        };
+        Self::services_json(resp, "layout/optimizers").await
+    }
+
+    /// Lifetime energy for a **single** optimizer.
+    ///
+    /// The endpoint's `totalEnergy` is one scalar covering all serials passed in
+    /// `optimizer-serials`, so batching would return the site sum with no
+    /// per-optimizer attribution. Hence one call per optimizer — the caller
+    /// fans these out concurrently.
+    pub async fn fetch_optimizer_energy(&self, serial: &str) -> Result<Option<f64>, PortalError> {
+        let auth = self.ensure_se_monitoring_auth().await?;
+        let today = jiff::Zoned::now().date();
+        let url = format!(
+            "{ORIGIN}/services/layout/energy-graph/site/{}/optimizers?chart-time-unit=years&start-date={}&end-date={}&optimizer-serials={}",
+            self.site_id, OPTIMIZER_ENERGY_START_DATE, today, serial
+        );
+        let resp = self
+            .services_request(self.http.get(&url), &auth.access_token)
+            .send()
+            .await?;
+        let parsed: EnergyGraphResponse = Self::services_json(resp, "layout/energy-graph").await?;
+        Ok(parsed.total_energy)
     }
 
     /// Site-level battery charge/discharge energy from the monitoring
     /// dashboard's energy service. This plugs the gap left by the public
     /// `storageData` API, which reports `lifeTimeEnergyCharged`/`Discharged`
-    /// as 0 for the SolarEdge Home Battery 48V. The endpoint rides the session
-    /// cookies warmed by `login()`, so call `login()` (or `fetch_energy`)
-    /// first in the same refresh cycle.
+    /// as 0 for the SolarEdge Home Battery 48V.
     ///
     /// We query a wide, fixed window so `summary` reflects the battery's whole
     /// lifetime and the totals stay monotonic across refreshes.
     pub async fn fetch_battery_energy(&self) -> Result<DashboardEnergyResponse, PortalError> {
-        // Authenticated by the Cognito `se_monitoring_auth` cookie, not Basic
-        // auth — see `cognito`. The cookie lives in the shared jar.
-        self.ensure_se_monitoring_auth().await?;
+        // Authenticated by the Cognito token — Basic auth is rejected here.
+        let auth = self.ensure_se_monitoring_auth().await?;
         let today = jiff::Zoned::now().date();
         let url = format!(
             "{ORIGIN}/services/dashboard/energy/sites/{}?chart-time-unit=years&start-date={}&end-date={}&measurement-types=production-distribution-with-storage%2Cconsumption-distribution-with-storage&isCniViewer=true",
             self.site_id, BATTERY_ENERGY_START_DATE, today
         );
         let resp = self
-            .http
-            .get(&url)
+            .services_request(self.http.get(&url), &auth.access_token)
             .header("X-Requested-With", "XMLHttpRequest")
-            .header(
-                reqwest::header::REFERER,
-                format!("{ORIGIN}/solaredge-web/p/site/{}/", self.site_id),
-            )
             .send()
             .await?;
         let status = resp.status();
@@ -356,18 +319,20 @@ impl PortalClient {
         Ok(resp)
     }
 
-    fn csrf_token(&self) -> Option<String> {
-        let url = Url::parse(ORIGIN).ok()?;
-        let header = CookieStore::cookies(self.jar.as_ref(), &url)?;
-        let s = header.to_str().ok()?;
-        for kv in s.split(';') {
-            let kv = kv.trim();
-            if let Some(v) = kv.strip_prefix("CSRF-TOKEN=") {
-                return Some(v.to_string());
-            }
-        }
-        None
+    /// Force a Cognito login if none is cached, reporting whether a handshake
+    /// actually happened. Used at startup so the `login_count` counter reflects
+    /// real SRP logins.
+    pub async fn warm_services_auth(&self) -> Result<bool, PortalError> {
+        Ok(self.ensure_se_monitoring_auth().await?.fresh_login)
     }
+}
+
+/// Outcome of `ensure_se_monitoring_auth`.
+struct ServicesAuth {
+    access_token: String,
+    /// `true` when this call performed an SRP handshake rather than reusing the
+    /// cached token.
+    fresh_login: bool,
 }
 
 pub(crate) fn truncate(s: &str) -> String {
@@ -380,52 +345,6 @@ pub(crate) fn truncate(s: &str) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
-}
-
-/// Parse JSON tolerating leading non-JSON junk (some portal endpoints wrap the
-/// payload). Equivalent to the Python reference's `jsonfinder` helper.
-fn extract_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, PortalError> {
-    if let Ok(v) = serde_json::from_str::<T>(text) {
-        return Ok(v);
-    }
-    let bytes = text.as_bytes();
-    let start = bytes
-        .iter()
-        .position(|&b| b == b'{')
-        .ok_or_else(|| PortalError::Parse("no JSON object found in response".into()))?;
-    let mut depth: i32 = 0;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes[start..].iter().enumerate() {
-        if in_string {
-            if escape {
-                escape = false;
-            } else if b == b'\\' {
-                escape = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let slice = &text[start..start + i + 1];
-                    return serde_json::from_str(slice).map_err(|e| PortalError::Json {
-                        endpoint: "publicSystemData",
-                        source: e,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    Err(PortalError::Parse(
-        "unbalanced braces while scanning for JSON object".into(),
-    ))
 }
 
 #[cfg(test)]
@@ -443,16 +362,6 @@ mod tests {
         let t = truncate(&s);
         assert!(t.len() > 500);
         assert!(t.ends_with('…'));
-    }
-
-    #[test]
-    fn extract_json_strips_prefix() {
-        #[derive(Debug, serde::Deserialize)]
-        struct Foo {
-            x: i32,
-        }
-        let v: Foo = extract_json("garbage{\"x\": 42}").expect("extracts object");
-        assert_eq!(v.x, 42);
     }
 
     #[test]

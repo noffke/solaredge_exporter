@@ -13,6 +13,7 @@
 #   - solaredge_portal_last_refresh_timestamp_seconds{kind}    — last good portal refresh
 #   - solaredge_monitoring_api_last_refresh_timestamp_seconds{endpoint}
 #   - solaredge_battery_energy_charged_watt_hours              — the value itself
+#   - solaredge_optimizer_power_watts                          — per-optimizer liveness
 #   - solaredge_monitoring_api_requests_total{endpoint}        — daily-budget guard
 #
 # NOTE on the *_over_time([20m]) windows: the solaredge_exporter scrape_interval
@@ -82,6 +83,25 @@ groups:
         annotations:
           summary: "SolarEdge battery charge/discharge unavailable"
           description: "solaredge_battery_energy_charged_watt_hours has produced no value for 1h. The Cognito login or the /services dashboard endpoint may be broken (re-capture pool/client IDs from a browser login if SolarEdge rotated them)."
+
+      # No per-optimizer telemetry at all since (re)start — most likely the
+      # startup layout fetch failed, so the exporter came up with an empty
+      # optimizer list (deliberate: a dead layout endpoint must not take the
+      # battery/meter/site-PV metrics down with it).
+      #
+      # The staleness rule above cannot catch this: with zero optimizers the
+      # last_refresh{kind="telemetry"} series never appears, so there is nothing
+      # for it to evaluate. SolarEdgePortalRefreshErrors{kind="layout"} does fire,
+      # but only for the hour following the single startup increment — this rule
+      # keeps alerting for as long as the exporter is actually blind.
+      - alert: SolarEdgeOptimizerMetricsMissing
+        expr: absent_over_time(solaredge_optimizer_power_watts[1h])
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "SolarEdge per-optimizer metrics unavailable"
+          description: "solaredge_optimizer_power_watts has produced no value for 1h. The startup layout fetch probably failed — check for 'fetch_site_structure failed' in the exporter logs. SolarEdge retired the old layout endpoint (HTTP 410) in July 2026; if the /services/layout API changed shape too, diff against AndrewTapp/solaredgeoptimizers."
 
   - name: solaredge_errors_and_budget
     rules:
