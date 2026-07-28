@@ -250,19 +250,41 @@ pub fn flatten_layout_v2(resp: &LayoutNodeV2) -> Vec<FlatOptimizer> {
     out
 }
 
+/// Strip a leading `"Optimizer "` device-type prefix from a v2 node name.
+///
+/// The v2 tree names optimizers `"Optimizer 1.0.1"`, where the retired tree's
+/// `displayName` was the bare panel position `"1.0.1"`. That difference is a
+/// **metric label value change**, which breaks series continuity in Prometheus —
+/// so we normalise back to the historical form. The metric name already says
+/// these are optimizers; the prefix carries no information.
+fn strip_optimizer_prefix(name: &str) -> &str {
+    const PREFIX: &str = "optimizer";
+    let trimmed = name.trim();
+    // `get` (not slicing) so a multi-byte name can't panic on a char boundary.
+    if let Some(head) = trimmed.get(..PREFIX.len())
+        && head.eq_ignore_ascii_case(PREFIX)
+    {
+        let rest = trimmed[PREFIX.len()..].trim_start();
+        if !rest.is_empty() {
+            return rest;
+        }
+    }
+    trimmed
+}
+
 fn flat_optimizer(
     opt: &LayoutNodeV2,
     inverter_serial: &str,
     inverter_display_name: &str,
 ) -> FlatOptimizer {
     let serial_number = opt.best_serial();
-    // The retired tree's `displayName` for an optimizer was the panel name
-    // ("1.1.1"), which is v2's `name` — keep using it so the `display_name`
-    // metric label doesn't churn.
-    let display_name = if opt.name.trim().is_empty() {
-        serial_number.clone()
-    } else {
-        opt.name.clone()
+    let display_name = {
+        let name = strip_optimizer_prefix(&opt.name);
+        if name.is_empty() {
+            serial_number.clone()
+        } else {
+            name.to_string()
+        }
     };
     FlatOptimizer {
         serial_number,
@@ -365,9 +387,9 @@ mod tests {
                                 "type": "FOLDER",
                                 "name": "OPTIMIZER",
                                 "children": [
-                                    {"type": "OPTIMIZER", "serial": "OPT1", "name": "1.1.1",
+                                    {"type": "OPTIMIZER", "serial": "OPT1", "name": "Optimizer 1.0.1",
                                      "uuid": "u1", "properties": {"status": "ACTIVE"}},
-                                    {"type": "OPTIMIZER", "serial": "OPT2", "name": "1.1.2",
+                                    {"type": "OPTIMIZER", "serial": "OPT2", "name": "Optimizer 1.0.2",
                                      "uuid": "u2", "properties": {"status": "REPLACED"}}
                                 ]
                             }]
@@ -384,7 +406,9 @@ mod tests {
         let flat = flatten_layout_v2(&resp);
         assert_eq!(flat.len(), 2);
         assert_eq!(flat[0].serial_number, "OPT1");
-        assert_eq!(flat[0].display_name, "1.1.1");
+        // Prefix stripped: v2 says "Optimizer 1.0.1", the pre-migration
+        // `display_name` label was "1.0.1". See strip_optimizer_prefix.
+        assert_eq!(flat[0].display_name, "1.0.1");
         assert_eq!(flat[0].inverter_serial, "INV1");
         assert_eq!(flat[0].inverter_display_name, "Inverter 1");
         assert!(flat[0].is_active());
@@ -469,6 +493,31 @@ mod tests {
         assert_eq!(flat[0].inverter_serial, "inv-uuid");
         assert_eq!(flat[0].inverter_display_name, "inv-uuid");
         assert!(flat[0].is_active());
+    }
+
+    /// Locks the `display_name` label to its pre-migration form. Getting this
+    /// wrong silently forks every optimizer series in Prometheus (verified
+    /// against live data on 2026-07-28: the first deploy emitted
+    /// "Optimizer 1.0.1" where history had "1.0.1").
+    #[test]
+    fn optimizer_display_name_drops_device_type_prefix() {
+        assert_eq!(strip_optimizer_prefix("Optimizer 1.0.1"), "1.0.1");
+        assert_eq!(strip_optimizer_prefix("Optimizer 1.0.18"), "1.0.18");
+        // Case and extra whitespace tolerated.
+        assert_eq!(strip_optimizer_prefix("  optimizer   1.0.2  "), "1.0.2");
+        assert_eq!(strip_optimizer_prefix("OPTIMIZER 1.0.3"), "1.0.3");
+        // Already bare (the legacy form, and what we want to emit).
+        assert_eq!(strip_optimizer_prefix("1.0.1"), "1.0.1");
+        // Must not strip when the prefix IS the whole name — that would leave
+        // nothing to label the series with.
+        assert_eq!(strip_optimizer_prefix("Optimizer"), "Optimizer");
+        assert_eq!(strip_optimizer_prefix("optimizer   "), "optimizer");
+        // Not a prefix match; leave alone.
+        assert_eq!(strip_optimizer_prefix("Optimizers 1.0.1"), "s 1.0.1");
+        assert_eq!(strip_optimizer_prefix("Panel 1.0.1"), "Panel 1.0.1");
+        // Multi-byte input must not panic on a char boundary.
+        assert_eq!(strip_optimizer_prefix("Ötimizer"), "Ötimizer");
+        assert_eq!(strip_optimizer_prefix(""), "");
     }
 
     #[test]

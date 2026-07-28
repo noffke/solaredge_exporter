@@ -172,6 +172,14 @@ Notes on each:
 - **There is no `reporter_id` any more.** The ONE API is keyed by optimizer
   **serial**, which is what `config.toml`'s `[[fields]]` already lists. Serial
   precedence when reading a node: `serial` → `properties.identifier` → `uuid`.
+- **Label values must stay byte-identical across the migration** or every series
+  forks in Prometheus. `optimizer`, `inverter` and `field` map over unchanged, but
+  the v2 tree names optimizers `"Optimizer 1.0.1"` where the retired tree's
+  `displayName` was the bare `"1.0.1"` — `strip_optimizer_prefix` normalises that
+  back. This was caught only by diffing live label values against Prometheus
+  history after the first deploy, so **if you touch label derivation, diff
+  `/api/v1/series` before and after** rather than eyeballing the startup log.
+  The `optimizer_display_name_drops_device_type_prefix` test locks it in.
 - **Live telemetry** returns `serialToLiveData` keyed by serial, with
   `power_W`, `current_A`, `voltage_V`, `optimizerVoltage_V`, `lastMeasurement`.
   These map 1:1 onto the six existing gauges, so no metric or label changed.
